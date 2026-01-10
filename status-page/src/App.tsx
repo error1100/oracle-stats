@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './App.css';
 import {
   DATAPOINT_PAGE_SIZE,
+  DEFAULT_ERGO_NODE_URL,
+  DEFAULT_REFRESH_INTERVAL_SECONDS,
   DEFAULT_POOL_ID,
   ORACLE_POOLS,
   type OraclePoolConfig,
@@ -10,6 +12,7 @@ import {
   buildExplorerLinks,
   fetchDatapointPage,
   fetchOperatorAddresses,
+  fetchNodeInfo,
   type RefreshBoxMarker,
 } from './services/datapointService';
 import type { EpochGroup, OracleDatapoint } from './types/datapoint';
@@ -86,6 +89,9 @@ function App() {
   const [totalTransactions, setTotalTransactions] = useState<number | null>(
     null,
   );
+  const [latestNodeHeight, setLatestNodeHeight] = useState<number | null>(null);
+  const [nextRefreshTimestamp, setNextRefreshTimestamp] = useState<number | null>(null);
+  const [secondsUntilNextRefresh, setSecondsUntilNextRefresh] = useState<number | null>(null);
   const [lastFetchedCount, setLastFetchedCount] = useState(0);
   const [refreshMarkers, setRefreshMarkers] = useState<RefreshBoxMarker[]>([]);
   const [desiredEpochs, setDesiredEpochs] = useState(MIN_VISIBLE_EPOCHS);
@@ -210,6 +216,80 @@ function App() {
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    setNextRefreshTimestamp(null);
+    if (!selectedPool) {
+      return;
+    }
+
+    const intervalSeconds =
+      selectedPool.REFRESH_INTERVAL_SECONDS ?? DEFAULT_REFRESH_INTERVAL_SECONDS;
+    if (intervalSeconds <= 0) {
+      return;
+    }
+
+    let timer: number | undefined;
+    let lastHeight = 0;
+    let cancelled = false;
+    const intervalMs = intervalSeconds * 1000;
+
+    const scheduleNextPoll = () => {
+      if (cancelled) {
+        return;
+      }
+      const nextTime = Date.now() + intervalMs;
+      setNextRefreshTimestamp(nextTime);
+      timer = window.setTimeout(poll, intervalMs);
+    };
+
+    const poll = async () => {
+      try {
+        const nodeUrl =
+          selectedPool.ergoNodeApiUrl ??
+          selectedPool.ergoNodeUrl ??
+          DEFAULT_ERGO_NODE_URL;
+        const info = await fetchNodeInfo(nodeUrl);
+        if (info.fullHeight) {
+          setLatestNodeHeight(info.fullHeight);
+          if (info.fullHeight !== lastHeight) {
+            lastHeight = info.fullHeight;
+            refresh();
+          }
+        }
+      } catch (error) {
+        console.error('Failed to poll ergo node info', error);
+      } finally {
+        scheduleNextPoll();
+      }
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+      if (timer) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [selectedPool, refresh]);
+
+  useEffect(() => {
+    if (nextRefreshTimestamp === null) {
+      setSecondsUntilNextRefresh(null);
+      return;
+    }
+    const updateCountdown = () => {
+      const remainingMs = nextRefreshTimestamp - Date.now();
+      const remainingSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+      setSecondsUntilNextRefresh(remainingSeconds);
+    };
+    updateCountdown();
+    const interval = window.setInterval(updateCountdown, 1000);
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [nextRefreshTimestamp]);
 
   useEffect(() => {
     if (visibleEpochs.length < desiredEpochs && hasMore && !isLoading) {
@@ -384,6 +464,18 @@ function App() {
               {formatRelativeTime(latestEpochTimestamp)}
             </p>
           )}
+        </div>
+        <div>
+          <p className="label">Current block</p>
+          <p className="stat">
+            {latestNodeHeight !== null ? formatNumber(latestNodeHeight) : '—'}
+          </p>
+          <p className="muted">
+            Next block check in{' '}
+            {secondsUntilNextRefresh !== null
+              ? `${secondsUntilNextRefresh}s`
+              : '—'}
+          </p>
         </div>
       </section>
 

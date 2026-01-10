@@ -15,6 +15,17 @@ export interface RefreshBoxMarker {
   timestamp?: number;
 }
 
+export interface ErgoNodeInfo {
+  name: string;
+  version: string;
+  fullHeight: number;
+  headersHeight: number;
+  stateRoot: string;
+  previousFullHash: string;
+  stateVersion: string;
+  network: string;
+}
+
 export interface DatapointPageResult {
   datapoints: OracleDatapoint[];
   totals: {
@@ -263,6 +274,9 @@ export const fetchOperatorAddresses = async (pool: OraclePoolConfig): Promise<st
     .filter(([, amount]) => amount === 1)
     .map(([address]) => address);
 };
+
+export const fetchNodeInfo = async (baseUrl: string): Promise<ErgoNodeInfo> =>
+  fetchJson<ErgoNodeInfo>(`${baseUrl}/info`);
 
 export const buildExplorerLinks = {
   transaction: (txId: string) => `${EXPLORER_UI_URL}/en/transactions/${txId}`,

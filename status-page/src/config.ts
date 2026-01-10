@@ -6,6 +6,7 @@ export interface OraclePoolConfig {
   description?: string;
   ergoNodeUrl?: string;
   ergoNodeApiUrl?: string;
+  REFRESH_INTERVAL_SECONDS?: number;
   oracleTokenId: string;
   datapointTokenId: string;
   refreshTokenId?: string;
@@ -38,3 +39,4 @@ export const EXPLORER_UI_URL = 'https://explorer.ergoplatform.com';
 
 export const NETWORK_PREFIX = NetworkPrefix.Mainnet;
 export const DATAPOINT_PAGE_SIZE = 50;
+export const DEFAULT_REFRESH_INTERVAL_SECONDS = 10;

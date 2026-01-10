@@ -22,9 +22,9 @@ npm run build        # produce production-ready assets in dist/
 Everything is defined in `src/config.ts`:
 
 - `ORACLE_POOLS` – array of pools. Every entry needs an id, label/description, oracle token ID (oracle NFT) and datapoint token ID (datapoint NFT). Add more pools here and they’ll show up in the UI selector automatically.
+- `REFRESH_INTERVAL_SECONDS` (per pool, optional) – override the polling cadence for the ergo-node `/info` endpoint that detects new blocks. Set to `0` to disable automatic block checks/refreshes when a pool shouldn’t auto-update.
 - `DEFAULT_POOL_ID` – which pool should be auto-selected on load
 - `DEFAULT_ERGO_NODE_URL` – ergo-node REST base
-- `Vite base` – `vite.config.ts` sets `base: './'` so the static bundle works when hosted under a GitHub Pages subpath. Change it if you deploy at a different root.
 - `EXPLORER_UI_URL` – only used for deep-linking to Explorer pages
 - `DATAPOINT_PAGE_SIZE` – pagination window when querying ergo-node
 
