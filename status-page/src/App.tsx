@@ -135,6 +135,8 @@ function App() {
     [epochsWithStatus, desiredEpochs],
   );
   const latestEpoch = visibleEpochs[0];
+  const latestEpochTimestamp =
+    latestEpoch?.refreshMarker?.timestamp ?? latestEpoch?.postedAt;
   const lastClosedEpoch = useMemo(
     () => epochsWithStatus.find((epoch) => epoch.refreshMarker) ?? epochsWithStatus[0],
     [epochsWithStatus],
@@ -379,7 +381,7 @@ function App() {
           {latestEpoch && (
             <p className="muted">
               {latestEpoch.datapoints.length} datapoints ·{' '}
-              {formatRelativeTime(latestEpoch.postedAt)}
+              {formatRelativeTime(latestEpochTimestamp)}
             </p>
           )}
         </div>
@@ -493,8 +495,8 @@ function App() {
                   </div>
                   <div className="epoch-meta">
                     <span>
-                      Block {epoch.blockHeight} ·{' '}
-                      {formatRelativeTime(epoch.postedAt)}
+                      Block {epoch.refreshMarker?.blockHeight ?? epoch.blockHeight} ·{' '}
+                      {formatRelativeTime(epoch.refreshMarker?.timestamp ?? epoch.postedAt)}
                     </span>
                     <span>{uniqueOracles} oracles</span>
                     <span>{epoch.datapoints.length} datapoints</span>
