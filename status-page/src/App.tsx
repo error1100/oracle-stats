@@ -121,13 +121,15 @@ function App() {
         epoch.datapoints
           .map((dp) => dp.spentTransactionId)
           .find((txId) => txId && refreshTxMap.has(txId)) ?? undefined;
-      const decoratedDatapoints: DecoratedDatapoint[] = epoch.datapoints.map((dp) => {
-        let refreshStatus: DecoratedDatapoint['refreshStatus'] = 'pending';
-        if (refreshTxId) {
-          refreshStatus = dp.spentTransactionId === refreshTxId ? 'included' : 'excluded';
-        }
-        return { ...dp, refreshStatus };
-      });
+        const decoratedDatapoints: DecoratedDatapoint[] = epoch.datapoints.map((dp) => {
+          let refreshStatus: DecoratedDatapoint['refreshStatus'] = 'pending';
+          if (refreshTxId) {
+            refreshStatus = dp.spentTransactionId === refreshTxId ? 'included' : 'excluded';
+          } else if (dp.spentTransactionId) {
+            refreshStatus = 'excluded';
+          }
+          return { ...dp, refreshStatus };
+        });
       return {
         epochId: epoch.epochId,
         blockHeight: epoch.blockHeight,
