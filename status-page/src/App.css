@@ -99,7 +99,7 @@ button:disabled {
   border-radius: 1rem;
   padding: 1.25rem;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 1rem;
   margin-bottom: 1.5rem;
 }
@@ -182,6 +182,11 @@ button:disabled {
   flex-wrap: wrap;
   font-size: 0.9rem;
   color: #a6b2cc;
+}
+
+.epoch-meta .oracle-value.compact {
+  font-size: 0.85rem;
+  word-break: break-all;
 }
 
 .datapoint-list {

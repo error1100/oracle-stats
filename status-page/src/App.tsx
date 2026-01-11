@@ -12,6 +12,7 @@ import {
   buildExplorerLinks,
   fetchDatapointPage,
   fetchOperatorAddresses,
+  fetchLatestOraclePoolValue,
   fetchNodeInfo,
   type RefreshBoxMarker,
 } from './services/datapointService';
@@ -100,6 +101,7 @@ function App() {
   const [desiredEpochs, setDesiredEpochs] = useState(MIN_VISIBLE_EPOCHS);
   const [expandedEpochs, setExpandedEpochs] = useState<Set<number>>(new Set());
   const [operatorAddresses, setOperatorAddresses] = useState<string[]>([]);
+  const [oraclePoolValue, setOraclePoolValue] = useState<number | null>(null);
   const loadMoreRef = useRef<HTMLDivElement | null>(null);
 
   const selectedPool: OraclePoolConfig | undefined = useMemo(
@@ -162,13 +164,17 @@ function App() {
     () => epochsWithStatus.slice(0, desiredEpochs),
     [epochsWithStatus, desiredEpochs],
   );
-  const latestEpoch = visibleEpochs[0];
-  const latestEpochTimestamp =
-    latestEpoch?.refreshMarker?.timestamp ?? latestEpoch?.postedAt;
   const lastClosedEpoch = useMemo(
     () => epochsWithStatus.find((epoch) => epoch.refreshMarker) ?? epochsWithStatus[0],
     [epochsWithStatus],
   );
+  const latestEpoch = visibleEpochs[0];
+  const latestOracleQuote = useMemo(
+    () => (oraclePoolValue !== null ? deriveQuotePerErg(oraclePoolValue) : null),
+    [oraclePoolValue],
+  );
+  const latestEpochTimestamp =
+    latestEpoch?.refreshMarker?.timestamp ?? latestEpoch?.postedAt;
   const activeOperatorCount = useMemo(() => {
     if (!lastClosedEpoch || operatorAddresses.length === 0) {
       return 0;
@@ -177,9 +183,6 @@ function App() {
     return operatorAddresses.filter((address) => activeSet.has(address)).length;
   }, [lastClosedEpoch, operatorAddresses]);
   const totalOperatorCount = operatorAddresses.length;
-  const uniqueOracleCount = new Set(
-    datapoints.map((dp) => dp.oracleAddress),
-  ).size;
   const hasMore =
     !error &&
     (totalTransactions === null ||
@@ -370,6 +373,32 @@ function App() {
   }, [selectedPool]);
 
   useEffect(() => {
+    if (!selectedPool) {
+      setOraclePoolValue(null);
+      return;
+    }
+    let isCancelled = false;
+    const loadOracleValue = async () => {
+      try {
+        const value = await fetchLatestOraclePoolValue(selectedPool);
+        if (!isCancelled) {
+          setOraclePoolValue(value);
+        }
+      } catch (error) {
+        console.error('Failed to load oracle pool value', error);
+        if (!isCancelled) {
+          setOraclePoolValue(null);
+        }
+      }
+    };
+    loadOracleValue();
+    return () => {
+      isCancelled = true;
+    };
+  }, [selectedPool, refreshMarkers]);
+
+
+  useEffect(() => {
     if (!visibleEpochs.length) {
       setExpandedEpochs(new Set());
       return;
@@ -416,9 +445,9 @@ function App() {
       <header className="page-header">
         <div>
           <p className="eyebrow">Ergo Oracle Core status</p>
-          <h1>Oracle stats</h1>
+          <h1>Oracle pool stats</h1>
           <p className="subtitle">
-            Tracking which oracles published datapoint and refresh transactions on each epoch across oracle pools.
+            Tracking oracle pool per epoch published datapoint and refresh transactions.
           </p>
         </div>
         <div className="header-actions">
@@ -456,13 +485,6 @@ function App() {
 
       <section className="address-panel">
         <div>
-          <p className="label">Loaded datapoints</p>
-          <p className="stat">{formatNumber(datapoints.length)}</p>
-          <p className="muted">
-            {uniqueOracleCount} unique oracle keys in view
-          </p>
-        </div>
-        <div>
           <p className="label">Operators</p>
           <p className="stat">
             {totalOperatorCount > 0
@@ -471,8 +493,19 @@ function App() {
           </p>
           <p className="muted">
             {totalOperatorCount > 0 && lastClosedEpoch
-              ? `Active in last closed epoch #${lastClosedEpoch.epochId}`
+              ? `Active in last epoch #${lastClosedEpoch.epochId}`
               : 'Loading operator roster…'}
+          </p>
+        </div>
+        <div>
+          <p className="label">Current value</p>
+          <p className="stat">
+            {oraclePoolValue !== null ? oraclePoolValue.toString() : '—'}
+          </p>
+          <p className="muted">
+            {latestOracleQuote !== null
+              ? `${formatPrice(latestOracleQuote)} ${quoteTicker}/ERG`
+              : 'Awaiting refresh'}
           </p>
         </div>
         <div>
@@ -490,7 +523,7 @@ function App() {
         <div>
           <p className="label">Current block</p>
           <p className="stat">
-            {latestNodeHeight !== null ? formatNumber(latestNodeHeight) : '—'}
+            {latestNodeHeight !== null ? latestNodeHeight.toString() : '—'}
           </p>
           <p className="muted">
             Next block check in{' '}
@@ -511,10 +544,6 @@ function App() {
             const uniqueOracles = new Set(
               epoch.datapoints.map((dp) => dp.oracleAddress),
             ).size;
-            const averageDatapoint =
-              epoch.datapoints.reduce((sum, dp) => sum + dp.value, 0) /
-              epoch.datapoints.length;
-            const derivedPrice = deriveQuotePerErg(averageDatapoint);
             const includedCount = epoch.datapoints.filter(
               (dp) => dp.refreshStatus === 'included',
             ).length;
@@ -618,11 +647,6 @@ function App() {
                     </span>
                     <span>{uniqueOracles} oracles</span>
                     <span>{epoch.datapoints.length} datapoints</span>
-                    {derivedPrice && (
-                      <span>
-                        Avg price {formatPrice(derivedPrice)} {quoteTicker}/ERG
-                      </span>
-                    )}
                     {epoch.refreshMarker && (
                       <span className="refresh-chip">
                         Refresh #{epoch.refreshMarker.blockHeight}
@@ -664,26 +688,35 @@ function App() {
                     </div>
                   </div>
                   <div className="mini-chart" role="img" aria-label={`Epoch ${epoch.epochId} datapoints`}>
-                    {chartDots.map((dot, index) =>
-                      dot.type === 'inactive' ? (
-                        <span
-                          key={`inactive-${epoch.epochId}-${dot.operator}-${index}`}
-                          className="mini-dot inactive"
-                          title={`No datapoint from ${shortenAddress(dot.operator, 6)}`}
-                        />
-                      ) : (
+                    {chartDots.map((dot, index) => {
+                      if (dot.type === 'inactive') {
+                        return (
+                          <span
+                            key={`inactive-${epoch.epochId}-${dot.operator}-${index}`}
+                            className="mini-dot inactive"
+                            title={`No datapoint from ${shortenAddress(dot.operator, 6)}`}
+                          />
+                        );
+                      }
+                      const datapointRate = deriveQuotePerErg(dot.datapoint.value);
+                      const valueLine = dot.datapoint.value.toString();
+                      const rateLine = datapointRate
+                        ? `${formatPrice(datapointRate)} ${quoteTicker}/ERG`
+                        : null;
+                      const infoLine = [valueLine, rateLine]
+                        .filter(Boolean)
+                        .join(' • ');
+                      return (
                         <a
                           key={`${dot.datapoint.boxId}-${dot.datapoint.oracleAddress}-${index}`}
                           className={`mini-dot ${dot.datapoint.refreshStatus} ${dot.datapoint.source}`}
-                          title={`Oracle ${shortenAddress(dot.datapoint.oracleAddress, 6)} • ${formatNumber(dot.datapoint.value)} • ${
-                            dot.datapoint.source === 'datapointBox' ? 'datapoint NFT' : 'oracle NFT'
-                          }\n${formatDateTime(dot.datapoint.timestamp)}`}
+                          title={`Oracle ${shortenAddress(dot.datapoint.oracleAddress, 6)} • ${infoLine}\n${formatDateTime(dot.datapoint.timestamp)}`}
                           href={explorerLinks.transaction(dot.datapoint.txId)}
                           target="_blank"
                           rel="noreferrer"
                         />
-                      ),
-                    )}
+                      );
+                    })}
                     {epoch.refreshMarker && (
                       <a
                         className="mini-refresh-dot"
@@ -785,7 +818,7 @@ function App() {
                             </p>
                           </div>
                           <div className="datapoint-value">
-                            <p className="value">{formatNumber(dp.value)}</p>
+                            <p className="value">{dp.value.toString()}</p>
                             <p className="muted">
                               {price
                                 ? `${formatPrice(price)} ${quoteTicker}/ERG`

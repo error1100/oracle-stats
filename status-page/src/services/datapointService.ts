@@ -14,6 +14,7 @@ export interface RefreshBoxMarker {
   blockHeight: number;
   timestamp?: number;
   globalIndex?: number;
+  value?: number;
 }
 
 export interface ErgoNodeInfo {
@@ -38,6 +39,13 @@ export interface DatapointPageResult {
     datapoint: number;
   };
   refreshBoxes: RefreshBoxMarker[];
+  oracleSnapshots: OraclePoolSnapshot[];
+}
+
+export interface OraclePoolSnapshot {
+  epochId: number;
+  value: number;
+  blockHeight: number;
 }
 
 const blockInfoCache = new Map<number, BlockHeader>();
@@ -236,7 +244,7 @@ export const fetchDatapointPage = async (
   const offset = page * pageSize;
   const refreshTokenId = pool.refreshTokenId;
   const [oracleBoxes, datapointBoxes, refreshBoxesResponse] = await Promise.all([
-    fetchBoxesByTokenId(nodeUrl, pool.oracleTokenId, offset, pageSize),
+    fetchBoxesByTokenId(nodeUrl, pool.oraclePoolTokenId, offset, pageSize),
     fetchBoxesByTokenId(nodeUrl, pool.datapointTokenId, offset, pageSize),
     refreshTokenId
       ? fetchBoxesByTokenId(nodeUrl, refreshTokenId, offset, pageSize)
@@ -244,11 +252,15 @@ export const fetchDatapointPage = async (
   ]);
 
   const oracleData = oracleBoxes.items
-    .map((box) => decodeOracleDatapoint(pool.id, pool.oracleTokenId, 'oracleBox', box))
+    .map((box) => decodeOracleDatapoint(pool.id, pool.oraclePoolTokenId, 'oracleBox', box))
     .filter((box): box is OracleDatapoint => Boolean(box));
   const datapointData = datapointBoxes.items
     .map((box) => decodeOracleDatapoint(pool.id, pool.datapointTokenId, 'datapointBox', box))
     .filter((box): box is OracleDatapoint => Boolean(box));
+
+  const oracleSnapshots = oracleBoxes.items
+    .map((box) => decodeOraclePoolSnapshot(box))
+    .filter((snapshot): snapshot is OraclePoolSnapshot => Boolean(snapshot));
 
   const deduped = new Map<string, OracleDatapoint>();
   [...oracleData, ...datapointData].forEach((dp) => {
@@ -266,6 +278,7 @@ export const fetchDatapointPage = async (
     txId: box.transactionId,
     blockHeight: box.inclusionHeight ?? box.creationHeight ?? 0,
     globalIndex: box.globalIndex,
+    value: box.additionalRegisters?.R4 ? decodeI64Register(box.additionalRegisters.R4) : undefined,
   }));
 
   await ensureBlockHeaders(
@@ -291,6 +304,7 @@ export const fetchDatapointPage = async (
       datapoint: datapointBoxes.items.length,
     },
     refreshBoxes,
+    oracleSnapshots,
   };
 };
 
@@ -317,6 +331,35 @@ export const fetchOperatorAddresses = async (pool: OraclePoolConfig): Promise<st
     .map(([address]) => address);
 };
 
+export const fetchLatestOraclePoolValue = async (
+  pool: OraclePoolConfig,
+): Promise<number | null> => {
+  const nodeUrl = pool.ergoNodeApiUrl ?? pool.ergoNodeUrl ?? DEFAULT_ERGO_NODE_URL;
+  const boxesRaw = await fetchUnspentBoxesByTokenId(nodeUrl, pool.oraclePoolTokenId, 0, 50);
+  const response: IndexedErgoBoxResponse = Array.isArray(boxesRaw)
+    ? { items: boxesRaw, total: boxesRaw.length }
+    : boxesRaw;
+  if (!response.items.length) {
+    return null;
+  }
+  const box = [...response.items].sort(
+    (a, b) =>
+      (b.inclusionHeight ?? b.creationHeight ?? 0) -
+      (a.inclusionHeight ?? a.creationHeight ?? 0),
+  )[0];
+  const registers = box?.additionalRegisters ?? {};
+  if (!registers.R4 || !registers.R5) {
+    return null;
+  }
+  try {
+    const value = decodeI64Register(registers.R4);
+    return value;
+  } catch (error) {
+    console.error('Failed to decode oracle pool value', { boxId: box.boxId }, error);
+    return null;
+  }
+};
+
 export const fetchNodeInfo = async (baseUrl: string): Promise<ErgoNodeInfo> =>
   fetchJson<ErgoNodeInfo>(`${baseUrl}/info`);
 
@@ -325,4 +368,21 @@ export const buildExplorerLinks = {
   box: (boxId: string) => `${EXPLORER_UI_URL}/en/box/${boxId}`,
   address: (address: string) => `${EXPLORER_UI_URL}/en/addresses/${address}`,
   token: (tokenId: string) => `${EXPLORER_UI_URL}/en/token/${tokenId}`,
+};
+const decodeOraclePoolSnapshot = (box: IndexedErgoBox): OraclePoolSnapshot | undefined => {
+  const registers = box.additionalRegisters ?? {};
+  const r4 = registers.R4;
+  const r5 = registers.R5;
+  if (!r4 || !r5) {
+    return undefined;
+  }
+  try {
+    const value = decodeI64Register(r4);
+    const epochId = decodeI32Register(r5);
+    const blockHeight = box.inclusionHeight ?? box.creationHeight ?? 0;
+    return { value, epochId, blockHeight };
+  } catch (error) {
+    console.error('Failed to decode oracle pool snapshot', { boxId: box.boxId }, error);
+    return undefined;
+  }
 };
