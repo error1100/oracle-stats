@@ -13,6 +13,7 @@ export interface RefreshBoxMarker {
   txId: string;
   blockHeight: number;
   timestamp?: number;
+  globalIndex?: number;
 }
 
 export interface ErgoNodeInfo {
@@ -40,6 +41,9 @@ export interface DatapointPageResult {
 }
 
 const blockInfoCache = new Map<number, BlockHeader>();
+const recentHeaderCacheByNode = new Map<string, Map<number, BlockHeader>>();
+const recentHeaderFetchPromises = new Map<string, Promise<void>>();
+const RECENT_HEADER_BATCH = 1440;
 
 const fetchJson = async <T>(url: string): Promise<T> => {
   const response = await fetch(url);
@@ -81,26 +85,61 @@ const fetchUnspentBoxesByTokenId = async (
   limit: number,
 ) => fetchJson<UnspentBoxResponse>(buildUnspentTokenUrl(nodeUrl, tokenId, offset, limit));
 
-const fetchBlockHeader = async (nodeUrl: string, height: number): Promise<BlockHeader | undefined> => {
-  if (!height) {
-    return undefined;
-  }
-  const cached = blockInfoCache.get(height);
-  if (cached) {
-    return cached;
+const fetchBlockHeader = async (nodeUrl: string, height: number): Promise<void> => {
+  if (!height || blockInfoCache.has(height)) {
+    return;
   }
   try {
     const headerIds = await fetchJson<string[]>(`${nodeUrl}/blocks/at/${height}`);
     if (!headerIds.length) {
-      return undefined;
+      return;
     }
     const header = await fetchJson<BlockHeader>(`${nodeUrl}/blocks/${headerIds[0]}/header`);
     blockInfoCache.set(height, header);
-    return header;
   } catch (error) {
     console.error(`Failed to fetch block header at height ${height}`, error);
-    return undefined;
   }
+};
+
+const ensureRecentHeaderCache = async (nodeUrl: string): Promise<void> => {
+  if (recentHeaderCacheByNode.has(nodeUrl)) {
+    return;
+  }
+  const existingPromise = recentHeaderFetchPromises.get(nodeUrl);
+  if (existingPromise) {
+    await existingPromise;
+    return;
+  }
+  const promise = (async () => {
+    try {
+      const headers = await fetchJson<BlockHeader[]>(
+        `${nodeUrl}/blocks/lastHeaders/${RECENT_HEADER_BATCH}`,
+      );
+      const map = new Map<number, BlockHeader>();
+      headers.forEach((header) => {
+        map.set(header.height, header);
+        blockInfoCache.set(header.height, header);
+      });
+      recentHeaderCacheByNode.set(nodeUrl, map);
+    } catch (error) {
+      console.error('Failed to fetch recent block headers', error);
+    } finally {
+      recentHeaderFetchPromises.delete(nodeUrl);
+    }
+  })();
+  recentHeaderFetchPromises.set(nodeUrl, promise);
+  await promise;
+};
+
+const ensureBlockHeaders = async (nodeUrl: string, heights: number[]): Promise<void> => {
+  await ensureRecentHeaderCache(nodeUrl);
+  const missing = Array.from(
+    new Set(heights.filter((height) => height > 0 && !blockInfoCache.has(height))),
+  );
+  if (!missing.length) {
+    return;
+  }
+  await Promise.all(missing.map((height) => fetchBlockHeader(nodeUrl, height)));
 };
 
 const fetchAllUnspentBoxesByTokenId = async (
@@ -158,6 +197,7 @@ const decodeOracleDatapoint = (
       source,
       tokenId,
       poolId,
+      globalIndex: box.globalIndex,
     };
   } catch (error) {
     console.error('Failed to decode oracle datapoint', error, {
@@ -176,7 +216,7 @@ const enrichWithBlockInfo = async (
   const uniqueHeights = Array.from(
     new Set(datapoints.map((dp) => dp.blockHeight).filter((height) => height > 0)),
   );
-  await Promise.all(uniqueHeights.map((height) => fetchBlockHeader(nodeUrl, height)));
+  await ensureBlockHeaders(nodeUrl, uniqueHeights);
   return datapoints.map((dp) => {
     const header = blockInfoCache.get(dp.blockHeight);
     return {
@@ -225,12 +265,14 @@ export const fetchDatapointPage = async (
     boxId: box.boxId,
     txId: box.transactionId,
     blockHeight: box.inclusionHeight ?? box.creationHeight ?? 0,
+    globalIndex: box.globalIndex,
   }));
 
-  await Promise.all(
+  await ensureBlockHeaders(
+    nodeUrl,
     refreshMarkersBase
       .filter((marker) => marker.blockHeight > 0)
-      .map((marker) => fetchBlockHeader(nodeUrl, marker.blockHeight)),
+      .map((marker) => marker.blockHeight),
   );
 
   const refreshBoxes = refreshMarkersBase.map((marker) => ({

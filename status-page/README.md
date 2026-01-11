@@ -32,5 +32,5 @@ Everything is defined in `src/config.ts`:
 
 - Register decoding relies exclusively on `ergo-lib-wasm-browser` so the same logic can run in-browser on GitHub Pages
 - Oracles are identified by their compressed public keys (R4) and converted to P2PK addresses for readability
-- Derived USD/ERG prices are computed as `1e9 / datapoint` which matches the oracle-core representation
+- Derived quote/ERG prices are computed as `1e9 / datapoint`; set each pool’s `quoteTicker` to control the label (USD, XAU, …)
 - Pagination requests grab datapoint and oracle NFT boxes separately, dedupe by boxId, and keep block info cached locally for fast browsing

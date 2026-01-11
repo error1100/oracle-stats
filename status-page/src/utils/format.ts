@@ -1,7 +1,7 @@
 const numberFormatter = new Intl.NumberFormat('en-US');
 const priceFormatter = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
-  maximumFractionDigits: 4,
+  maximumFractionDigits: 6,
 });
 
 export const formatNumber = (value: number) => numberFormatter.format(value);

@@ -193,7 +193,7 @@ button:disabled {
 
 .datapoint-row {
   display: grid;
-  grid-template-columns: 220px 160px 1fr;
+  grid-template-columns: minmax(200px, 240px) minmax(200px, 260px) minmax(240px, 1fr);
   gap: 1rem;
   align-items: flex-start;
   padding: 0.9rem;
@@ -234,9 +234,16 @@ button:disabled {
   font-weight: 600;
 }
 
+.datapoint-value,
+.datapoint-meta {
+  min-width: 0;
+}
+
 .datapoint-value .value {
   font-size: 1.3rem;
   font-weight: 600;
+  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 .datapoint-meta {

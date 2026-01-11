@@ -15,6 +15,7 @@ export interface OracleDatapoint {
   source: DatapointSource;
   tokenId: string;
   poolId: string;
+  globalIndex?: number;
 }
 
 export interface EpochGroup {

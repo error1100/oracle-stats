@@ -32,6 +32,9 @@ interface EpochWithStatus {
   epochId: number;
   datapoints: DecoratedDatapoint[];
   blockHeight: number;
+  startBlock?: number;
+  endBlock?: number;
+  blockSpan?: number;
   postedAt?: number;
   refreshTxId?: string;
   refreshMarker?: RefreshBoxMarker;
@@ -75,7 +78,7 @@ const groupByEpoch = (datapoints: OracleDatapoint[]): EpochGroup[] => {
     });
 };
 
-const deriveErgPerUsd = (datapoint: number) =>
+const deriveQuotePerErg = (datapoint: number) =>
   datapoint > 0 ? 1_000_000_000 / datapoint : null;
 
 const MIN_VISIBLE_EPOCHS = 3;
@@ -103,6 +106,7 @@ function App() {
     () => ORACLE_POOLS.find((pool) => pool.id === selectedPoolId) ?? ORACLE_POOLS[0],
     [selectedPoolId],
   );
+  const quoteTicker = selectedPool?.quoteTicker ?? 'USD';
 
   const refreshTxMap = useMemo(() => {
     const map = new Map<string, RefreshBoxMarker>();
@@ -111,31 +115,47 @@ function App() {
   }, [refreshMarkers]);
 
   const groupedEpochs = useMemo(() => groupByEpoch(datapoints), [datapoints]);
-  const epochsWithStatus: EpochWithStatus[] = useMemo(
-    () =>
-      groupedEpochs.map((epoch) => {
-        const refreshTxId =
-          epoch.datapoints
-            .map((dp) => dp.spentTransactionId)
-            .find((txId) => txId && refreshTxMap.has(txId)) ?? undefined;
-        const decoratedDatapoints: DecoratedDatapoint[] = epoch.datapoints.map((dp) => {
-          let refreshStatus: DecoratedDatapoint['refreshStatus'] = 'pending';
-          if (refreshTxId) {
-            refreshStatus = dp.spentTransactionId === refreshTxId ? 'included' : 'excluded';
-          }
-          return { ...dp, refreshStatus };
-        });
-        return {
-          epochId: epoch.epochId,
-          blockHeight: epoch.blockHeight,
-          postedAt: epoch.postedAt,
-          datapoints: decoratedDatapoints,
-          refreshTxId,
-          refreshMarker: refreshTxId ? refreshTxMap.get(refreshTxId) : undefined,
-        };
-      }),
-    [groupedEpochs, refreshTxMap],
-  );
+  const epochsWithStatus: EpochWithStatus[] = useMemo(() => {
+    const base = groupedEpochs.map((epoch) => {
+      const refreshTxId =
+        epoch.datapoints
+          .map((dp) => dp.spentTransactionId)
+          .find((txId) => txId && refreshTxMap.has(txId)) ?? undefined;
+      const decoratedDatapoints: DecoratedDatapoint[] = epoch.datapoints.map((dp) => {
+        let refreshStatus: DecoratedDatapoint['refreshStatus'] = 'pending';
+        if (refreshTxId) {
+          refreshStatus = dp.spentTransactionId === refreshTxId ? 'included' : 'excluded';
+        }
+        return { ...dp, refreshStatus };
+      });
+      return {
+        epochId: epoch.epochId,
+        blockHeight: epoch.blockHeight,
+        postedAt: epoch.postedAt,
+        datapoints: decoratedDatapoints,
+        refreshTxId,
+        refreshMarker: refreshTxId ? refreshTxMap.get(refreshTxId) : undefined,
+      };
+    });
+    return base.map((epoch, index, array) => {
+      const previousRefreshBlock = array[index + 1]?.refreshMarker?.blockHeight;
+      const startBlock =
+        previousRefreshBlock !== undefined && previousRefreshBlock !== null
+          ? previousRefreshBlock + 1
+          : undefined;
+      const endBlock = epoch.refreshMarker?.blockHeight ?? epoch.blockHeight;
+      const blockSpan =
+        typeof startBlock === 'number' && typeof endBlock === 'number'
+          ? Math.max(0, endBlock - startBlock + 1)
+          : undefined;
+      return {
+        ...epoch,
+        startBlock,
+        endBlock,
+        blockSpan,
+      };
+    });
+  }, [groupedEpochs, refreshTxMap]);
   const visibleEpochs = useMemo(
     () => epochsWithStatus.slice(0, desiredEpochs),
     [epochsWithStatus, desiredEpochs],
@@ -492,7 +512,7 @@ function App() {
             const averageDatapoint =
               epoch.datapoints.reduce((sum, dp) => sum + dp.value, 0) /
               epoch.datapoints.length;
-            const derivedPrice = deriveErgPerUsd(averageDatapoint);
+            const derivedPrice = deriveQuotePerErg(averageDatapoint);
             const includedCount = epoch.datapoints.filter(
               (dp) => dp.refreshStatus === 'included',
             ).length;
@@ -587,14 +607,18 @@ function App() {
                   </div>
                   <div className="epoch-meta">
                     <span>
-                      Block {epoch.refreshMarker?.blockHeight ?? epoch.blockHeight} ·{' '}
+                      Length{' '}
+                      {typeof epoch.blockSpan === 'number'
+                        ? `${formatNumber(epoch.blockSpan)} blocks`
+                        : '—'}{' '}
+                      ·{' '}
                       {formatRelativeTime(epoch.refreshMarker?.timestamp ?? epoch.postedAt)}
                     </span>
                     <span>{uniqueOracles} oracles</span>
                     <span>{epoch.datapoints.length} datapoints</span>
                     {derivedPrice && (
                       <span>
-                        Avg price {formatPrice(derivedPrice)} USD/ERG
+                        Avg price {formatPrice(derivedPrice)} {quoteTicker}/ERG
                       </span>
                     )}
                     {epoch.refreshMarker && (
@@ -695,7 +719,22 @@ function App() {
                           refresh: epoch.refreshMarker,
                         });
                       }
-                      return transactionRows;
+                      return transactionRows.sort((a, b) => {
+                        const aIndex =
+                          a.type === 'refresh'
+                            ? a.refresh.globalIndex ?? Number.POSITIVE_INFINITY
+                            : a.datapoint.globalIndex ?? -Infinity;
+                        const bIndex =
+                          b.type === 'refresh'
+                            ? b.refresh.globalIndex ?? Number.POSITIVE_INFINITY
+                            : b.datapoint.globalIndex ?? -Infinity;
+                        if (aIndex !== bIndex) {
+                          return bIndex - aIndex;
+                        }
+                        if (a.type === 'refresh') return -1;
+                        if (b.type === 'refresh') return 1;
+                        return (b.datapoint.timestamp ?? 0) - (a.datapoint.timestamp ?? 0);
+                      });
                     })().map((entry) => {
                       if (entry.type === 'refresh') {
                         const refresh = entry.refresh;
@@ -735,7 +774,7 @@ function App() {
                         );
                       }
                       const dp = entry.datapoint;
-                      const price = deriveErgPerUsd(dp.value);
+                      const price = deriveQuotePerErg(dp.value);
                       return (
                         <div key={dp.boxId} className={`datapoint-row ${dp.refreshStatus}`}>
                           <div className="oracle-info">
@@ -747,7 +786,7 @@ function App() {
                             <p className="value">{formatNumber(dp.value)}</p>
                             <p className="muted">
                               {price
-                                ? `${formatPrice(price)} USD/ERG`
+                                ? `${formatPrice(price)} ${quoteTicker}/ERG`
                                 : 'N/A'}
                             </p>
                           </div>
