@@ -128,15 +128,15 @@ function App() {
         epoch.datapoints
           .map((dp) => dp.spentTransactionId)
           .find((txId) => txId && refreshTxMap.has(txId)) ?? undefined;
-        const decoratedDatapoints: DecoratedDatapoint[] = epoch.datapoints.map((dp) => {
-          let refreshStatus: DecoratedDatapoint['refreshStatus'] = 'pending';
-          if (refreshTxId) {
-            refreshStatus = dp.spentTransactionId === refreshTxId ? 'included' : 'excluded';
-          } else if (dp.spentTransactionId) {
-            refreshStatus = 'excluded';
-          }
-          return { ...dp, refreshStatus };
-        });
+      const decoratedDatapoints: DecoratedDatapoint[] = epoch.datapoints.map((dp) => {
+        let refreshStatus: DecoratedDatapoint['refreshStatus'] = 'pending';
+        if (refreshTxId) {
+          refreshStatus = dp.spentTransactionId === refreshTxId ? 'included' : 'excluded';
+        } else if (dp.spentTransactionId) {
+          refreshStatus = 'excluded';
+        }
+        return { ...dp, refreshStatus };
+      });
       return {
         epochId: epoch.epochId,
         blockHeight: epoch.blockHeight,
@@ -145,7 +145,7 @@ function App() {
         refreshMarker: refreshTxId ? refreshTxMap.get(refreshTxId) : undefined,
       };
     });
-    return base.map((epoch, index, array) => {
+    const withRanges = base.map((epoch, index, array) => {
       const previousRefreshBlock = array[index + 1]?.refreshMarker?.blockHeight;
       const startBlock =
         previousRefreshBlock !== undefined && previousRefreshBlock !== null
@@ -163,6 +163,30 @@ function App() {
         blockSpan,
       };
     });
+    const latestEpochWithData = withRanges[0];
+    if (!latestEpochWithData || !latestEpochWithData.refreshMarker) {
+      return withRanges;
+    }
+    const refreshBlockHeight = latestEpochWithData.refreshMarker.blockHeight;
+    const placeholderStart =
+      typeof refreshBlockHeight === 'number' && !Number.isNaN(refreshBlockHeight)
+        ? refreshBlockHeight + 1
+        : undefined;
+    const placeholderBlockHeight =
+      typeof refreshBlockHeight === 'number' && !Number.isNaN(refreshBlockHeight)
+        ? refreshBlockHeight
+        : latestEpochWithData.blockHeight;
+    const placeholderEpoch: EpochWithStatus = {
+      epochId: latestEpochWithData.epochId + 1,
+      datapoints: [],
+      blockHeight: placeholderBlockHeight,
+      startBlock: placeholderStart,
+      endBlock: undefined,
+      blockSpan: undefined,
+      refreshTxId: undefined,
+      refreshMarker: undefined,
+    };
+    return [placeholderEpoch, ...withRanges];
   }, [groupedEpochs, refreshTxMap]);
   const visibleEpochs = useMemo(
     () => epochsWithStatus.slice(0, desiredEpochs),
@@ -532,10 +556,7 @@ function App() {
           </p>
           {latestEpoch && (
             <p className="muted">
-              {latestEpoch.datapoints.length} datapoints ·{' '}
-              {latestEpochLastBlock !== null
-                ? `Last block #${latestEpochLastBlock}`
-                : 'Block info pending'}
+              {latestEpoch.datapoints.length} datapoints{' '}
             </p>
           )}
         </div>
@@ -668,8 +689,6 @@ function App() {
                       {typeof epoch.blockSpan === 'number'
                         ? `${epoch.blockSpan} blocks`
                         : '—'}{' '}
-                      · Last block #
-                      {epoch.endBlock ?? epoch.blockHeight}
                     </span>
                     <span>{uniqueOracles} oracles</span>
                     <span>{epoch.datapoints.length} datapoints</span>
