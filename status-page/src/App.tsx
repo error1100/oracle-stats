@@ -9,7 +9,7 @@ import {
   type OraclePoolConfig,
 } from './config';
 import {
-  buildExplorerLinks,
+  buildExplorerLinks as explorerLinks,
   fetchDatapointPage,
   fetchOperatorAddresses,
   fetchLatestOraclePoolValue,
@@ -32,6 +32,26 @@ interface EpochWithStatus {
   blockSpan?: number;
   refreshTxId?: string;
   refreshMarker?: RefreshBoxMarker;
+}
+
+type ChartDot =
+  | { type: 'datapoint'; datapoint: DecoratedDatapoint }
+  | { type: 'inactive'; operator: string };
+
+type EpochTransactionRow =
+  | { type: 'datapoint'; datapoint: DecoratedDatapoint }
+  | { type: 'refresh'; refresh: RefreshBoxMarker };
+
+interface EpochRenderStats {
+  uniqueOracles: number;
+  includedCount: number;
+  excludedCount: number;
+  pendingCount: number;
+  activeOperators: number;
+  inactiveCount: number;
+  totalOperators: number;
+  chartDots: ChartDot[];
+  transactionRows: EpochTransactionRow[];
 }
 
 const isNewerDatapoint = (candidate: OracleDatapoint, current?: OracleDatapoint) => {
@@ -87,6 +107,166 @@ const groupByEpoch = (datapoints: OracleDatapoint[]): EpochGroup[] => {
 const deriveQuotePerErg = (datapoint: number) =>
   datapoint > 0 ? 1_000_000_000 / datapoint : null;
 
+const sortByBlockAsc = (a: OracleDatapoint, b: OracleDatapoint) => {
+  if (a.blockHeight !== b.blockHeight) {
+    return a.blockHeight - b.blockHeight;
+  }
+  const aIndex = a.globalIndex ?? Number.MIN_SAFE_INTEGER;
+  const bIndex = b.globalIndex ?? Number.MIN_SAFE_INTEGER;
+  return aIndex - bIndex;
+};
+
+const buildDatapointsByAddress = (datapoints: DecoratedDatapoint[]) => {
+  const map = new Map<string, DecoratedDatapoint[]>();
+  datapoints.forEach((dp) => {
+    const list = map.get(dp.oracleAddress);
+    if (list) {
+      list.push(dp);
+    } else {
+      map.set(dp.oracleAddress, [dp]);
+    }
+  });
+  return map;
+};
+
+const buildChartDots = (
+  operatorUniverse: string[],
+  datapointsByAddress: Map<string, DecoratedDatapoint[]>,
+): ChartDot[] => {
+  const dots: ChartDot[] = [];
+  const knownOperators = new Set(operatorUniverse);
+  const sortedCache = new Map<string, DecoratedDatapoint[]>();
+  const getSortedDatapoints = (address: string) => {
+    if (sortedCache.has(address)) {
+      return sortedCache.get(address)!;
+    }
+    const sorted = [...(datapointsByAddress.get(address) ?? [])].sort(sortByBlockAsc);
+    sortedCache.set(address, sorted);
+    return sorted;
+  };
+
+  operatorUniverse.forEach((address) => {
+    const sorted = getSortedDatapoints(address);
+    if (!sorted.length) {
+      dots.push({ type: 'inactive', operator: address });
+      return;
+    }
+    sorted.forEach((dp) => dots.push({ type: 'datapoint', datapoint: dp }));
+  });
+
+  datapointsByAddress.forEach((_list, address) => {
+    if (!knownOperators.has(address)) {
+      getSortedDatapoints(address).forEach((dp) => {
+        dots.push({ type: 'datapoint', datapoint: dp });
+      });
+    }
+  });
+
+  return dots.sort((a, b) => {
+    const getHeight = (dot: ChartDot) =>
+      dot.type === 'inactive' ? 0 : dot.datapoint.blockHeight ?? 0;
+    const aHeight = getHeight(a);
+    const bHeight = getHeight(b);
+    if (aHeight !== bHeight) {
+      return aHeight - bHeight;
+    }
+    if (a.type !== b.type) {
+      return a.type === 'inactive' ? -1 : 1;
+    }
+    if (a.type === 'inactive' || b.type === 'inactive') {
+      return 0;
+    }
+    const aIndex = a.datapoint.globalIndex ?? Number.MIN_SAFE_INTEGER;
+    const bIndex = b.datapoint.globalIndex ?? Number.MIN_SAFE_INTEGER;
+    return aIndex - bIndex;
+  });
+};
+
+const buildTransactionRows = (epoch: EpochWithStatus): EpochTransactionRow[] => {
+  const rows: EpochTransactionRow[] = epoch.datapoints.map((dp) => ({
+    type: 'datapoint',
+    datapoint: dp,
+  }));
+  if (epoch.refreshMarker) {
+    rows.push({ type: 'refresh', refresh: epoch.refreshMarker });
+  }
+  return rows.sort((a, b) => {
+    const aIndex =
+      a.type === 'refresh'
+        ? a.refresh.globalIndex ?? Number.POSITIVE_INFINITY
+        : a.datapoint.globalIndex ?? Number.NEGATIVE_INFINITY;
+    const bIndex =
+      b.type === 'refresh'
+        ? b.refresh.globalIndex ?? Number.POSITIVE_INFINITY
+        : b.datapoint.globalIndex ?? Number.NEGATIVE_INFINITY;
+    if (aIndex !== bIndex) {
+      return bIndex - aIndex;
+    }
+    if (a.type === 'refresh') return -1;
+    if (b.type === 'refresh') return 1;
+    return b.datapoint.blockHeight - a.datapoint.blockHeight;
+  });
+};
+
+const buildEpochRenderStats = (
+  epoch: EpochWithStatus,
+  operatorAddresses: string[],
+): EpochRenderStats => {
+  const uniqueOracles = new Set(epoch.datapoints.map((dp) => dp.oracleAddress)).size;
+  const includedCount = epoch.datapoints.filter(
+    (dp) => dp.refreshStatus === 'included',
+  ).length;
+  const excludedCount = epoch.datapoints.filter(
+    (dp) => dp.refreshStatus === 'excluded',
+  ).length;
+  const datapointsByAddress = buildDatapointsByAddress(epoch.datapoints);
+  const operatorUniverse =
+    operatorAddresses.length > 0
+      ? operatorAddresses
+      : Array.from(datapointsByAddress.keys());
+  const inactiveCount = operatorUniverse.reduce(
+    (count, address) => (datapointsByAddress.has(address) ? count : count + 1),
+    0,
+  );
+  const totalOperators = operatorUniverse.length;
+  const activeOperators = Math.max(0, totalOperators - inactiveCount);
+  return {
+    uniqueOracles,
+    includedCount,
+    excludedCount,
+    pendingCount: epoch.datapoints.length - includedCount - excludedCount,
+    activeOperators,
+    inactiveCount,
+    totalOperators,
+    chartDots: buildChartDots(operatorUniverse, datapointsByAddress),
+    transactionRows: buildTransactionRows(epoch),
+  };
+};
+
+const mergeRefreshMarkers = (markers: RefreshBoxMarker[]) => {
+  const map = new Map<string, RefreshBoxMarker>();
+  markers.forEach((marker) => {
+    const existing = map.get(marker.boxId);
+    const markerIndex = marker.globalIndex ?? Number.MIN_SAFE_INTEGER;
+    const existingIndex = existing?.globalIndex ?? Number.MIN_SAFE_INTEGER;
+    if (
+      !existing ||
+      marker.blockHeight > existing.blockHeight ||
+      (marker.blockHeight === existing.blockHeight && markerIndex > existingIndex)
+    ) {
+      map.set(marker.boxId, marker);
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => {
+    if (a.blockHeight !== b.blockHeight) {
+      return b.blockHeight - a.blockHeight;
+    }
+    const aIndex = a.globalIndex ?? Number.MIN_SAFE_INTEGER;
+    const bIndex = b.globalIndex ?? Number.MIN_SAFE_INTEGER;
+    return bIndex - aIndex;
+  });
+};
+
 const MIN_VISIBLE_EPOCHS = 3;
 
 function App() {
@@ -99,7 +279,6 @@ function App() {
     null,
   );
   const [latestNodeHeight, setLatestNodeHeight] = useState<number | null>(null);
-  const [nextRefreshTimestamp, setNextRefreshTimestamp] = useState<number | null>(null);
   const [secondsUntilNextRefresh, setSecondsUntilNextRefresh] = useState<number | null>(null);
   const [lastFetchedCount, setLastFetchedCount] = useState(0);
   const [refreshMarkers, setRefreshMarkers] = useState<RefreshBoxMarker[]>([]);
@@ -188,6 +367,13 @@ function App() {
     };
     return [placeholderEpoch, ...withRanges];
   }, [groupedEpochs, refreshTxMap]);
+  const epochStats = useMemo(() => {
+    const map = new Map<number, EpochRenderStats>();
+    epochsWithStatus.forEach((epoch) => {
+      map.set(epoch.epochId, buildEpochRenderStats(epoch, operatorAddresses));
+    });
+    return map;
+  }, [epochsWithStatus, operatorAddresses]);
   const visibleEpochs = useMemo(
     () => epochsWithStatus.slice(0, desiredEpochs),
     [epochsWithStatus, desiredEpochs],
@@ -197,19 +383,17 @@ function App() {
     [epochsWithStatus],
   );
   const latestEpoch = visibleEpochs[0];
-  const latestEpochLastBlock =
-    latestEpoch?.endBlock ?? latestEpoch?.blockHeight ?? null;
   const latestOracleQuote = useMemo(
     () => (oraclePoolValue !== null ? deriveQuotePerErg(oraclePoolValue) : null),
     [oraclePoolValue],
   );
-  const activeOperatorCount = useMemo(() => {
-    if (!lastClosedEpoch || operatorAddresses.length === 0) {
-      return 0;
-    }
-    const activeSet = new Set(lastClosedEpoch.datapoints.map((dp) => dp.oracleAddress));
-    return operatorAddresses.filter((address) => activeSet.has(address)).length;
-  }, [lastClosedEpoch, operatorAddresses]);
+  const lastClosedEpochStats = lastClosedEpoch
+    ? epochStats.get(lastClosedEpoch.epochId)
+    : undefined;
+  const activeOperatorCount =
+    operatorAddresses.length && lastClosedEpochStats
+      ? lastClosedEpochStats.activeOperators
+      : 0;
   const totalOperatorCount = operatorAddresses.length;
   const hasMore =
     !error &&
@@ -240,27 +424,7 @@ function App() {
         });
         setRefreshMarkers((current) => {
           const combined = replace ? refreshBoxes : [...current, ...refreshBoxes];
-          const map = new Map<string, RefreshBoxMarker>();
-          combined.forEach((marker) => {
-            const existing = map.get(marker.boxId);
-            const markerIndex = marker.globalIndex ?? Number.MIN_SAFE_INTEGER;
-            const existingIndex = existing?.globalIndex ?? Number.MIN_SAFE_INTEGER;
-            if (
-              !existing ||
-              marker.blockHeight > existing.blockHeight ||
-              (marker.blockHeight === existing.blockHeight && markerIndex > existingIndex)
-            ) {
-              map.set(marker.boxId, marker);
-            }
-          });
-          return Array.from(map.values()).sort((a, b) => {
-            if (a.blockHeight !== b.blockHeight) {
-              return b.blockHeight - a.blockHeight;
-            }
-            const aIndex = a.globalIndex ?? Number.MIN_SAFE_INTEGER;
-            const bIndex = b.globalIndex ?? Number.MIN_SAFE_INTEGER;
-            return bIndex - aIndex;
-          });
+          return mergeRefreshMarkers(combined);
         });
         setCurrentPage(nextPage);
       } catch (err) {
@@ -280,33 +444,63 @@ function App() {
   }, [loadPage]);
 
   useEffect(() => {
+    setDatapoints([]);
+    setCurrentPage(0);
+    setTotalTransactions(null);
+    setError(null);
+    setRefreshMarkers([]);
+    setDesiredEpochs(MIN_VISIBLE_EPOCHS);
+    setOperatorAddresses([]);
+  }, [selectedPoolId]);
+
+  useEffect(() => {
     refresh();
   }, [refresh]);
 
   useEffect(() => {
-    setNextRefreshTimestamp(null);
     if (!selectedPool) {
+      setSecondsUntilNextRefresh(null);
       return;
     }
 
     const intervalSeconds =
       selectedPool.REFRESH_INTERVAL_SECONDS ?? DEFAULT_REFRESH_INTERVAL_SECONDS;
     if (intervalSeconds <= 0) {
+      setSecondsUntilNextRefresh(null);
       return;
     }
 
-    let timer: number | undefined;
+    let pollTimer: number | undefined;
+    let countdownTimer: number | undefined;
     let lastHeight = 0;
     let cancelled = false;
     const intervalMs = intervalSeconds * 1000;
+
+    const startCountdown = (targetTime: number) => {
+      if (countdownTimer) {
+        window.clearInterval(countdownTimer);
+      }
+      const update = () => {
+        if (cancelled) {
+          return;
+        }
+        const remainingSeconds = Math.max(
+          0,
+          Math.ceil((targetTime - Date.now()) / 1000),
+        );
+        setSecondsUntilNextRefresh(remainingSeconds);
+      };
+      update();
+      countdownTimer = window.setInterval(update, 1000);
+    };
 
     const scheduleNextPoll = () => {
       if (cancelled) {
         return;
       }
       const nextTime = Date.now() + intervalMs;
-      setNextRefreshTimestamp(nextTime);
-      timer = window.setTimeout(poll, intervalMs);
+      startCountdown(nextTime);
+      pollTimer = window.setTimeout(poll, intervalMs);
     };
 
     const poll = async () => {
@@ -334,28 +528,14 @@ function App() {
 
     return () => {
       cancelled = true;
-      if (timer) {
-        window.clearTimeout(timer);
+      if (pollTimer) {
+        window.clearTimeout(pollTimer);
+      }
+      if (countdownTimer) {
+        window.clearInterval(countdownTimer);
       }
     };
   }, [selectedPool, refresh]);
-
-  useEffect(() => {
-    if (nextRefreshTimestamp === null) {
-      setSecondsUntilNextRefresh(null);
-      return;
-    }
-    const updateCountdown = () => {
-      const remainingMs = nextRefreshTimestamp - Date.now();
-      const remainingSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
-      setSecondsUntilNextRefresh(remainingSeconds);
-    };
-    updateCountdown();
-    const interval = window.setInterval(updateCountdown, 1000);
-    return () => {
-      window.clearInterval(interval);
-    };
-  }, [nextRefreshTimestamp]);
 
   useEffect(() => {
     if (visibleEpochs.length < desiredEpochs && hasMore && !isLoading) {
@@ -440,34 +620,12 @@ function App() {
 
 
   useEffect(() => {
-    if (!visibleEpochs.length) {
-      setExpandedEpochs(new Set());
-      return;
-    }
     setExpandedEpochs((current) => {
       const allowedIds = new Set(visibleEpochs.map((epoch) => epoch.epochId));
-      const next = new Set<number>();
-      current.forEach((id) => {
-        if (allowedIds.has(id)) {
-          next.add(id);
-        }
-      });
-      if (next.size === current.size) {
-        let identical = true;
-        current.forEach((id) => {
-          if (!next.has(id)) {
-            identical = false;
-          }
-        });
-        if (identical) {
-          return current;
-        }
-      }
-      return next;
+      const filtered = new Set([...current].filter((id) => allowedIds.has(id)));
+      return filtered.size === current.size ? current : filtered;
     });
   }, [visibleEpochs]);
-
-  const explorerLinks = buildExplorerLinks;
 
   const toggleEpochExpansion = useCallback((epochId: number) => {
     setExpandedEpochs((current) => {
@@ -501,13 +659,6 @@ function App() {
               value={selectedPool?.id ?? ''}
               onChange={(event) => {
                 setSelectedPoolId(event.target.value);
-                setDatapoints([]);
-                setCurrentPage(0);
-                setTotalTransactions(null);
-                setError(null);
-                setRefreshMarkers([]);
-                setDesiredEpochs(MIN_VISIBLE_EPOCHS);
-                setOperatorAddresses([]);
               }}
               disabled={isLoading}
             >
@@ -534,7 +685,7 @@ function App() {
           </p>
           <p className="muted">
             {totalOperatorCount > 0 && lastClosedEpoch
-              ? `Active in last epoch #${lastClosedEpoch.epochId}`
+              ? `Active in last epoch ${lastClosedEpoch.epochId}`
               : 'Loading operator roster…'}
           </p>
         </div>
@@ -551,9 +702,7 @@ function App() {
         </div>
         <div>
           <p className="label">Latest epoch</p>
-          <p className="stat">
-            {latestEpoch ? `#${latestEpoch.epochId}` : '—'}
-          </p>
+          <p className="stat">{latestEpoch ? `${latestEpoch.epochId}` : '—'}</p>
           {latestEpoch && (
             <p className="muted">
               {latestEpoch.datapoints.length} datapoints{' '}
@@ -581,97 +730,10 @@ function App() {
       ) : (
         <section className="epochs">
           {visibleEpochs.map((epoch) => {
-            const uniqueOracles = new Set(
-              epoch.datapoints.map((dp) => dp.oracleAddress),
-            ).size;
-            const includedCount = epoch.datapoints.filter(
-              (dp) => dp.refreshStatus === 'included',
-            ).length;
-            const excludedCount = epoch.datapoints.filter(
-              (dp) => dp.refreshStatus === 'excluded',
-            ).length;
-            const pendingCount =
-              epoch.datapoints.length - includedCount - excludedCount;
-            const datapointsByAddress = new Map<string, DecoratedDatapoint[]>();
-            epoch.datapoints.forEach((dp) => {
-              const list = datapointsByAddress.get(dp.oracleAddress) ?? [];
-              list.push(dp);
-              datapointsByAddress.set(dp.oracleAddress, list);
-            });
-            const datapointAddresses = new Set(datapointsByAddress.keys());
-            const operatorUniverse =
-              operatorAddresses.length > 0
-                ? operatorAddresses
-                : Array.from(datapointAddresses.values());
-            const operatorAddressSet = new Set(operatorUniverse);
-            const inactiveOperators = operatorUniverse.filter(
-              (address) => !datapointAddresses.has(address),
-            );
-            const totalOperators = operatorUniverse.length;
-            const activeOperators = Math.max(
-              0,
-              totalOperators - inactiveOperators.length,
-            );
-            const inactiveCount = Math.max(0, totalOperators - activeOperators);
-            const buildSortedDatapoints = (address: string) =>
-              [...(datapointsByAddress.get(address) ?? [])].sort((a, b) => {
-                if (a.blockHeight !== b.blockHeight) {
-                  return a.blockHeight - b.blockHeight;
-                }
-                const aIndex = a.globalIndex ?? Number.MIN_SAFE_INTEGER;
-                const bIndex = b.globalIndex ?? Number.MIN_SAFE_INTEGER;
-                return aIndex - bIndex;
-              });
-            const chartDots: Array<
-              | { type: 'datapoint'; datapoint: DecoratedDatapoint; sortHeight: number }
-              | { type: 'inactive'; operator: string; sortHeight: number }
-            > = [];
-            operatorUniverse.forEach((address) => {
-              const operatorDatapoints = buildSortedDatapoints(address);
-              if (operatorDatapoints.length === 0) {
-                chartDots.push({
-                  type: 'inactive',
-                  operator: address,
-                  sortHeight: 0,
-                });
-              } else {
-                operatorDatapoints.forEach((dp) =>
-                  chartDots.push({
-                    type: 'datapoint',
-                    datapoint: dp,
-                    sortHeight: dp.blockHeight ?? 0,
-                  }),
-                );
-              }
-            });
-            Array.from(datapointAddresses.values())
-              .filter((address) => !operatorAddressSet.has(address))
-              .forEach((address) => {
-                buildSortedDatapoints(address).forEach((dp) =>
-                  chartDots.push({
-                    type: 'datapoint',
-                    datapoint: dp,
-                    sortHeight: dp.blockHeight ?? 0,
-                  }),
-                );
-              });
-            chartDots.sort((a, b) => {
-              if (a.sortHeight !== b.sortHeight) {
-                return a.sortHeight - b.sortHeight;
-              }
-              if (a.type === 'inactive' && b.type !== 'inactive') {
-                return -1;
-              }
-              if (a.type !== 'inactive' && b.type === 'inactive') {
-                return 1;
-              }
-              if (a.type === 'datapoint' && b.type === 'datapoint') {
-                const aIndex = a.datapoint.globalIndex ?? Number.MIN_SAFE_INTEGER;
-                const bIndex = b.datapoint.globalIndex ?? Number.MIN_SAFE_INTEGER;
-                return aIndex - bIndex;
-              }
-              return 0;
-            });
+            const stats = epochStats.get(epoch.epochId);
+            if (!stats) {
+              return null;
+            }
             const isExpanded = expandedEpochs.has(epoch.epochId);
             return (
               <article
@@ -681,7 +743,7 @@ function App() {
                 <header>
                   <div>
                     <p className="eyebrow">Epoch</p>
-                    <h2>#{epoch.epochId}</h2>
+                    <h2>{epoch.epochId}</h2>
                   </div>
                   <div className="epoch-meta">
                     <span>
@@ -690,11 +752,11 @@ function App() {
                         ? `${epoch.blockSpan} blocks`
                         : '—'}{' '}
                     </span>
-                    <span>{uniqueOracles} oracles</span>
+                    <span>{stats.uniqueOracles} oracles</span>
                     <span>{epoch.datapoints.length} datapoints</span>
                     {epoch.refreshMarker && (
                       <span className="refresh-chip">
-                        Refresh #{epoch.refreshMarker.blockHeight}
+                        Refresh {epoch.refreshMarker.blockHeight}
                       </span>
                     )}
                   </div>
@@ -707,33 +769,33 @@ function App() {
                     </div>
                     <div>
                       <p className="label">Included</p>
-                      <p className="stat small">{includedCount}</p>
+                      <p className="stat small">{stats.includedCount}</p>
                     </div>
                     <div>
                       <p className="label">Excluded</p>
-                      <p className="stat small">{excludedCount}</p>
+                      <p className="stat small">{stats.excludedCount}</p>
                     </div>
                     <div>
                       <p className="label">Pending</p>
-                      <p className="stat small">{pendingCount}</p>
+                      <p className="stat small">{stats.pendingCount}</p>
                     </div>
                     <div>
                       <p className="label">Operators</p>
                       <p className="stat small">
-                        {totalOperators > 0
-                          ? `${formatNumber(activeOperators)} / ${formatNumber(totalOperators)}`
+                        {stats.totalOperators > 0
+                          ? `${formatNumber(stats.activeOperators)} / ${formatNumber(stats.totalOperators)}`
                           : '—'}
                       </p>
                     </div>
                     <div>
                       <p className="label">Inactive</p>
                       <p className="stat small">
-                        {totalOperators > 0 ? formatNumber(inactiveCount) : '—'}
+                        {stats.totalOperators > 0 ? formatNumber(stats.inactiveCount) : '—'}
                       </p>
                     </div>
                   </div>
                   <div className="mini-chart" role="img" aria-label={`Epoch ${epoch.epochId} datapoints`}>
-                    {chartDots.map((dot, index) => {
+                    {stats.chartDots.map((dot, index) => {
                       if (dot.type === 'inactive') {
                         return (
                           <a
@@ -746,8 +808,9 @@ function App() {
                           />
                         );
                       }
-                      const datapointRate = deriveQuotePerErg(dot.datapoint.value);
-                      const valueLine = dot.datapoint.value.toString();
+                      const dp = dot.datapoint;
+                      const datapointRate = deriveQuotePerErg(dp.value);
+                      const valueLine = dp.value.toString();
                       const rateLine = datapointRate
                         ? `${formatPrice(datapointRate)} ${quoteTicker}/ERG`
                         : null;
@@ -756,10 +819,10 @@ function App() {
                         .join(' • ');
                       return (
                         <a
-                          key={`${dot.datapoint.boxId}-${dot.datapoint.oracleAddress}-${index}`}
-                          className={`mini-dot ${dot.datapoint.refreshStatus} ${dot.datapoint.source}`}
-                          title={`Oracle ${shortenAddress(dot.datapoint.oracleAddress, 6)} • ${infoLine}\nBlock #${dot.datapoint.blockHeight}`}
-                          href={explorerLinks.transaction(dot.datapoint.txId)}
+                          key={`${dp.boxId}-${dp.oracleAddress}-${index}`}
+                          className={`mini-dot ${dp.refreshStatus} ${dp.source}`}
+                          title={`Oracle ${shortenAddress(dp.oracleAddress, 6)} • ${infoLine}\nBlock ${dp.blockHeight}`}
+                          href={explorerLinks.transaction(dp.txId)}
                           target="_blank"
                           rel="noreferrer"
                         />
@@ -768,7 +831,7 @@ function App() {
                     {epoch.refreshMarker && (
                       <a
                         className="mini-refresh-dot"
-                        title={`Refresh block #${epoch.refreshMarker.blockHeight}`}
+                        title={`Refresh block ${epoch.refreshMarker.blockHeight}`}
                         href={explorerLinks.transaction(epoch.refreshMarker.txId)}
                         target="_blank"
                         rel="noreferrer"
@@ -788,37 +851,7 @@ function App() {
                 </div>
                 {isExpanded && (
                   <div className="datapoint-list">
-                    {(() => {
-                      const transactionRows: Array<
-                        | { type: 'datapoint'; datapoint: DecoratedDatapoint }
-                        | { type: 'refresh'; refresh: RefreshBoxMarker }
-                      > = epoch.datapoints.map((dp) => ({
-                        type: 'datapoint',
-                        datapoint: dp,
-                      }));
-                      if (epoch.refreshMarker) {
-                        transactionRows.push({
-                          type: 'refresh',
-                          refresh: epoch.refreshMarker,
-                        });
-                      }
-                      return transactionRows.sort((a, b) => {
-                        const aIndex =
-                          a.type === 'refresh'
-                            ? a.refresh.globalIndex ?? Number.POSITIVE_INFINITY
-                            : a.datapoint.globalIndex ?? -Infinity;
-                        const bIndex =
-                          b.type === 'refresh'
-                            ? b.refresh.globalIndex ?? Number.POSITIVE_INFINITY
-                            : b.datapoint.globalIndex ?? -Infinity;
-                        if (aIndex !== bIndex) {
-                          return bIndex - aIndex;
-                        }
-                        if (a.type === 'refresh') return -1;
-                        if (b.type === 'refresh') return 1;
-                        return b.datapoint.blockHeight - a.datapoint.blockHeight;
-                      });
-                    })().map((entry) => {
+                    {stats.transactionRows.map((entry) => {
                       if (entry.type === 'refresh') {
                         const refresh = entry.refresh;
                         return (
@@ -832,7 +865,7 @@ function App() {
                             <div className="datapoint-value">
                               <p className="value">—</p>
                               <p className="muted">
-                                Includes {includedCount} datapoints
+                                Includes {stats.includedCount} datapoints
                               </p>
                             </div>
                             <div className="datapoint-meta">
