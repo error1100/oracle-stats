@@ -6,13 +6,12 @@ import {
 } from '../config';
 import { decodeI32Register, decodeI64Register, decodeOraclePublicKey } from '../lib/ergo';
 import type { OracleDatapoint } from '../types/datapoint';
-import type { BlockHeader, IndexedErgoBox, IndexedErgoBoxResponse } from '../types/ergoNode';
+import type { IndexedErgoBox, IndexedErgoBoxResponse } from '../types/ergoNode';
 
 export interface RefreshBoxMarker {
   boxId: string;
   txId: string;
   blockHeight: number;
-  timestamp?: number;
   globalIndex?: number;
   value?: number;
 }
@@ -47,11 +46,6 @@ export interface OraclePoolSnapshot {
   value: number;
   blockHeight: number;
 }
-
-const blockInfoCache = new Map<number, BlockHeader>();
-const recentHeaderCacheByNode = new Map<string, Map<number, BlockHeader>>();
-const recentHeaderFetchPromises = new Map<string, Promise<void>>();
-const RECENT_HEADER_BATCH = 1440;
 
 const fetchJson = async <T>(url: string): Promise<T> => {
   const response = await fetch(url);
@@ -92,63 +86,6 @@ const fetchUnspentBoxesByTokenId = async (
   offset: number,
   limit: number,
 ) => fetchJson<UnspentBoxResponse>(buildUnspentTokenUrl(nodeUrl, tokenId, offset, limit));
-
-const fetchBlockHeader = async (nodeUrl: string, height: number): Promise<void> => {
-  if (!height || blockInfoCache.has(height)) {
-    return;
-  }
-  try {
-    const headerIds = await fetchJson<string[]>(`${nodeUrl}/blocks/at/${height}`);
-    if (!headerIds.length) {
-      return;
-    }
-    const header = await fetchJson<BlockHeader>(`${nodeUrl}/blocks/${headerIds[0]}/header`);
-    blockInfoCache.set(height, header);
-  } catch (error) {
-    console.error(`Failed to fetch block header at height ${height}`, error);
-  }
-};
-
-const ensureRecentHeaderCache = async (nodeUrl: string): Promise<void> => {
-  if (recentHeaderCacheByNode.has(nodeUrl)) {
-    return;
-  }
-  const existingPromise = recentHeaderFetchPromises.get(nodeUrl);
-  if (existingPromise) {
-    await existingPromise;
-    return;
-  }
-  const promise = (async () => {
-    try {
-      const headers = await fetchJson<BlockHeader[]>(
-        `${nodeUrl}/blocks/lastHeaders/${RECENT_HEADER_BATCH}`,
-      );
-      const map = new Map<number, BlockHeader>();
-      headers.forEach((header) => {
-        map.set(header.height, header);
-        blockInfoCache.set(header.height, header);
-      });
-      recentHeaderCacheByNode.set(nodeUrl, map);
-    } catch (error) {
-      console.error('Failed to fetch recent block headers', error);
-    } finally {
-      recentHeaderFetchPromises.delete(nodeUrl);
-    }
-  })();
-  recentHeaderFetchPromises.set(nodeUrl, promise);
-  await promise;
-};
-
-const ensureBlockHeaders = async (nodeUrl: string, heights: number[]): Promise<void> => {
-  await ensureRecentHeaderCache(nodeUrl);
-  const missing = Array.from(
-    new Set(heights.filter((height) => height > 0 && !blockInfoCache.has(height))),
-  );
-  if (!missing.length) {
-    return;
-  }
-  await Promise.all(missing.map((height) => fetchBlockHeader(nodeUrl, height)));
-};
 
 const fetchAllUnspentBoxesByTokenId = async (
   nodeUrl: string,
@@ -217,24 +154,6 @@ const decodeOracleDatapoint = (
   }
 };
 
-const enrichWithBlockInfo = async (
-  datapoints: OracleDatapoint[],
-  nodeUrl: string,
-): Promise<OracleDatapoint[]> => {
-  const uniqueHeights = Array.from(
-    new Set(datapoints.map((dp) => dp.blockHeight).filter((height) => height > 0)),
-  );
-  await ensureBlockHeaders(nodeUrl, uniqueHeights);
-  return datapoints.map((dp) => {
-    const header = blockInfoCache.get(dp.blockHeight);
-    return {
-      ...dp,
-      blockId: header?.id,
-      timestamp: header?.timestamp,
-    };
-  });
-};
-
 export const fetchDatapointPage = async (
   pool: OraclePoolConfig,
   page: number,
@@ -271,7 +190,6 @@ export const fetchDatapointPage = async (
   });
 
   const sorted = Array.from(deduped.values()).sort((a, b) => b.blockHeight - a.blockHeight);
-  const enriched = await enrichWithBlockInfo(sorted, nodeUrl);
 
   const refreshMarkersBase: RefreshBoxMarker[] = refreshBoxesResponse.items.map((box) => ({
     boxId: box.boxId,
@@ -281,20 +199,8 @@ export const fetchDatapointPage = async (
     value: box.additionalRegisters?.R4 ? decodeI64Register(box.additionalRegisters.R4) : undefined,
   }));
 
-  await ensureBlockHeaders(
-    nodeUrl,
-    refreshMarkersBase
-      .filter((marker) => marker.blockHeight > 0)
-      .map((marker) => marker.blockHeight),
-  );
-
-  const refreshBoxes = refreshMarkersBase.map((marker) => ({
-    ...marker,
-    timestamp: blockInfoCache.get(marker.blockHeight)?.timestamp,
-  }));
-
   return {
-    datapoints: enriched,
+    datapoints: sorted,
     totals: {
       oracle: oracleBoxes.total,
       datapoint: datapointBoxes.total,
@@ -303,7 +209,7 @@ export const fetchDatapointPage = async (
       oracle: oracleBoxes.items.length,
       datapoint: datapointBoxes.items.length,
     },
-    refreshBoxes,
+    refreshBoxes: refreshMarkersBase,
     oracleSnapshots,
   };
 };

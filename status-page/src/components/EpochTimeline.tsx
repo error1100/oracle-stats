@@ -1,12 +1,11 @@
 import type { RefreshBoxMarker } from '../services/datapointService';
 import type { OracleDatapoint } from '../types/datapoint';
-import { formatDateTime, formatNumber, formatRelativeTime, shortenAddress } from '../utils/format';
+import { formatNumber, shortenAddress } from '../utils/format';
 
 export interface TimelineEpochRange {
   epochId: number;
   startIndex: number;
   endIndex: number;
-  postedAt?: number;
   refreshHeight?: number;
   refreshTxId?: string;
 }
@@ -54,7 +53,9 @@ const EpochTimeline = ({ epochRanges, refreshMarkers, epochDatapoints }: EpochTi
                   <h3>#{range.epochId}</h3>
                 </div>
                 <div className="epoch-meta">
-                  <span>{range.postedAt ? formatRelativeTime(range.postedAt) : 'unknown timing'}</span>
+                  <span>
+                    Range #{formatNumber(range.startIndex)}–#{formatNumber(range.endIndex)}
+                  </span>
                   {range.refreshHeight && (
                     <span className="refresh-chip">Refresh #{range.refreshHeight}</span>
                   )}
@@ -67,7 +68,7 @@ const EpochTimeline = ({ epochRanges, refreshMarkers, epochDatapoints }: EpochTi
                     className={`datapoint-dot ${dp.source} ${dp.refreshStatus ?? ''}`}
                     title={`Oracle ${shortenAddress(dp.oracleAddress, 6)} • ${formatNumber(dp.value)} • ${
                       dp.source === 'datapointBox' ? 'datapoint NFT' : 'oracle NFT'
-                    }\n${formatDateTime(dp.timestamp)}`}
+                    }\nBlock #${dp.blockHeight}`}
                   />
                 ))}
                 {refreshMarker && (

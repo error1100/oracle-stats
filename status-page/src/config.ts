@@ -41,5 +41,5 @@ export const DEFAULT_POOL_ID = ORACLE_POOLS[0]?.id ?? 'oracle-usd';
 export const EXPLORER_UI_URL = 'https://explorer.ergoplatform.com';
 
 export const NETWORK_PREFIX = NetworkPrefix.Mainnet;
-export const DATAPOINT_PAGE_SIZE = 50;
+export const DATAPOINT_PAGE_SIZE = 100;
 export const DEFAULT_REFRESH_INTERVAL_SECONDS = 10;

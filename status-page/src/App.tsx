@@ -17,13 +17,7 @@ import {
   type RefreshBoxMarker,
 } from './services/datapointService';
 import type { EpochGroup, OracleDatapoint } from './types/datapoint';
-import {
-  formatDateTime,
-  formatNumber,
-  formatPrice,
-  formatRelativeTime,
-  shortenAddress,
-} from './utils/format';
+import { formatNumber, formatPrice, shortenAddress } from './utils/format';
 
 type DecoratedDatapoint = OracleDatapoint & {
   refreshStatus: 'included' | 'excluded' | 'pending';
@@ -36,24 +30,38 @@ interface EpochWithStatus {
   startBlock?: number;
   endBlock?: number;
   blockSpan?: number;
-  postedAt?: number;
   refreshTxId?: string;
   refreshMarker?: RefreshBoxMarker;
 }
+
+const isNewerDatapoint = (candidate: OracleDatapoint, current?: OracleDatapoint) => {
+  if (!current) return true;
+  if (candidate.blockHeight !== current.blockHeight) {
+    return candidate.blockHeight > current.blockHeight;
+  }
+  const candidateIndex = candidate.globalIndex ?? Number.MIN_SAFE_INTEGER;
+  const currentIndex = current.globalIndex ?? Number.MIN_SAFE_INTEGER;
+  return candidateIndex > currentIndex;
+};
+
+const sortByBlockDesc = (a: OracleDatapoint, b: OracleDatapoint) => {
+  if (a.blockHeight !== b.blockHeight) {
+    return b.blockHeight - a.blockHeight;
+  }
+  const aIndex = a.globalIndex ?? Number.MIN_SAFE_INTEGER;
+  const bIndex = b.globalIndex ?? Number.MIN_SAFE_INTEGER;
+  return bIndex - aIndex;
+};
 
 const dedupeByBoxId = (items: OracleDatapoint[]) => {
   const map = new Map<string, OracleDatapoint>();
   items.forEach((item) => {
     const existing = map.get(item.boxId);
-    const existingTimestamp = existing?.timestamp ?? 0;
-    const itemTimestamp = item.timestamp ?? 0;
-    if (!existing || existingTimestamp < itemTimestamp) {
+    if (isNewerDatapoint(item, existing)) {
       map.set(item.boxId, item);
     }
   });
-  return Array.from(map.values()).sort(
-    (a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0),
-  );
+  return Array.from(map.values()).sort(sortByBlockDesc);
 };
 
 const groupByEpoch = (datapoints: OracleDatapoint[]): EpochGroup[] => {
@@ -67,15 +75,12 @@ const groupByEpoch = (datapoints: OracleDatapoint[]): EpochGroup[] => {
   return Array.from(map.entries())
     .sort((a, b) => b[0] - a[0])
     .map(([epochId, entries]) => {
-      const sorted = entries.sort(
-        (a, b) => (b.timestamp ?? 0) - (a.timestamp ?? 0),
-      );
+      const sorted = entries.sort(sortByBlockDesc);
       const blockHeight = sorted.reduce(
         (max, entry) => (entry.blockHeight > max ? entry.blockHeight : max),
         sorted[0]?.blockHeight ?? 0,
       );
-      const postedAt = sorted[0]?.timestamp;
-      return { epochId, datapoints: sorted, blockHeight, postedAt };
+      return { epochId, datapoints: sorted, blockHeight };
     });
 };
 
@@ -135,7 +140,6 @@ function App() {
       return {
         epochId: epoch.epochId,
         blockHeight: epoch.blockHeight,
-        postedAt: epoch.postedAt,
         datapoints: decoratedDatapoints,
         refreshTxId,
         refreshMarker: refreshTxId ? refreshTxMap.get(refreshTxId) : undefined,
@@ -169,12 +173,12 @@ function App() {
     [epochsWithStatus],
   );
   const latestEpoch = visibleEpochs[0];
+  const latestEpochLastBlock =
+    latestEpoch?.endBlock ?? latestEpoch?.blockHeight ?? null;
   const latestOracleQuote = useMemo(
     () => (oraclePoolValue !== null ? deriveQuotePerErg(oraclePoolValue) : null),
     [oraclePoolValue],
   );
-  const latestEpochTimestamp =
-    latestEpoch?.refreshMarker?.timestamp ?? latestEpoch?.postedAt;
   const activeOperatorCount = useMemo(() => {
     if (!lastClosedEpoch || operatorAddresses.length === 0) {
       return 0;
@@ -215,11 +219,24 @@ function App() {
           const map = new Map<string, RefreshBoxMarker>();
           combined.forEach((marker) => {
             const existing = map.get(marker.boxId);
-            if (!existing || (marker.timestamp ?? 0) > (existing.timestamp ?? 0)) {
+            const markerIndex = marker.globalIndex ?? Number.MIN_SAFE_INTEGER;
+            const existingIndex = existing?.globalIndex ?? Number.MIN_SAFE_INTEGER;
+            if (
+              !existing ||
+              marker.blockHeight > existing.blockHeight ||
+              (marker.blockHeight === existing.blockHeight && markerIndex > existingIndex)
+            ) {
               map.set(marker.boxId, marker);
             }
           });
-          return Array.from(map.values()).sort((a, b) => b.blockHeight - a.blockHeight);
+          return Array.from(map.values()).sort((a, b) => {
+            if (a.blockHeight !== b.blockHeight) {
+              return b.blockHeight - a.blockHeight;
+            }
+            const aIndex = a.globalIndex ?? Number.MIN_SAFE_INTEGER;
+            const bIndex = b.globalIndex ?? Number.MIN_SAFE_INTEGER;
+            return bIndex - aIndex;
+          });
         });
         setCurrentPage(nextPage);
       } catch (err) {
@@ -516,7 +533,9 @@ function App() {
           {latestEpoch && (
             <p className="muted">
               {latestEpoch.datapoints.length} datapoints ·{' '}
-              {formatRelativeTime(latestEpochTimestamp)}
+              {latestEpochLastBlock !== null
+                ? `Last block #${latestEpochLastBlock}`
+                : 'Block info pending'}
             </p>
           )}
         </div>
@@ -574,9 +593,14 @@ function App() {
             );
             const inactiveCount = Math.max(0, totalOperators - activeOperators);
             const buildSortedDatapoints = (address: string) =>
-              [...(datapointsByAddress.get(address) ?? [])].sort(
-                (a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0),
-              );
+              [...(datapointsByAddress.get(address) ?? [])].sort((a, b) => {
+                if (a.blockHeight !== b.blockHeight) {
+                  return a.blockHeight - b.blockHeight;
+                }
+                const aIndex = a.globalIndex ?? Number.MIN_SAFE_INTEGER;
+                const bIndex = b.globalIndex ?? Number.MIN_SAFE_INTEGER;
+                return aIndex - bIndex;
+              });
             const chartDots: Array<
               | { type: 'datapoint'; datapoint: DecoratedDatapoint; sortHeight: number }
               | { type: 'inactive'; operator: string; sortHeight: number }
@@ -621,7 +645,9 @@ function App() {
                 return 1;
               }
               if (a.type === 'datapoint' && b.type === 'datapoint') {
-                return (a.datapoint.timestamp ?? 0) - (b.datapoint.timestamp ?? 0);
+                const aIndex = a.datapoint.globalIndex ?? Number.MIN_SAFE_INTEGER;
+                const bIndex = b.datapoint.globalIndex ?? Number.MIN_SAFE_INTEGER;
+                return aIndex - bIndex;
               }
               return 0;
             });
@@ -640,10 +666,10 @@ function App() {
                     <span>
                       Length{' '}
                       {typeof epoch.blockSpan === 'number'
-                        ? `${formatNumber(epoch.blockSpan)} blocks`
+                        ? `${epoch.blockSpan} blocks`
                         : '—'}{' '}
-                      ·{' '}
-                      {formatRelativeTime(epoch.refreshMarker?.timestamp ?? epoch.postedAt)}
+                      · Last block #
+                      {epoch.endBlock ?? epoch.blockHeight}
                     </span>
                     <span>{uniqueOracles} oracles</span>
                     <span>{epoch.datapoints.length} datapoints</span>
@@ -691,10 +717,13 @@ function App() {
                     {chartDots.map((dot, index) => {
                       if (dot.type === 'inactive') {
                         return (
-                          <span
+                          <a
                             key={`inactive-${epoch.epochId}-${dot.operator}-${index}`}
                             className="mini-dot inactive"
                             title={`No datapoint from ${shortenAddress(dot.operator, 6)}`}
+                            href={explorerLinks.address(dot.operator)}
+                            target="_blank"
+                            rel="noreferrer"
                           />
                         );
                       }
@@ -710,7 +739,7 @@ function App() {
                         <a
                           key={`${dot.datapoint.boxId}-${dot.datapoint.oracleAddress}-${index}`}
                           className={`mini-dot ${dot.datapoint.refreshStatus} ${dot.datapoint.source}`}
-                          title={`Oracle ${shortenAddress(dot.datapoint.oracleAddress, 6)} • ${infoLine}\n${formatDateTime(dot.datapoint.timestamp)}`}
+                          title={`Oracle ${shortenAddress(dot.datapoint.oracleAddress, 6)} • ${infoLine}\nBlock #${dot.datapoint.blockHeight}`}
                           href={explorerLinks.transaction(dot.datapoint.txId)}
                           target="_blank"
                           rel="noreferrer"
@@ -768,7 +797,7 @@ function App() {
                         }
                         if (a.type === 'refresh') return -1;
                         if (b.type === 'refresh') return 1;
-                        return (b.datapoint.timestamp ?? 0) - (a.datapoint.timestamp ?? 0);
+                        return b.datapoint.blockHeight - a.datapoint.blockHeight;
                       });
                     })().map((entry) => {
                       if (entry.type === 'refresh') {
@@ -789,8 +818,7 @@ function App() {
                             </div>
                             <div className="datapoint-meta">
                               <p>
-                                Block {refresh.blockHeight} ·{' '}
-                                {formatDateTime(refresh.timestamp)}
+                                Block {refresh.blockHeight}
                               </p>
                               <div className="links">
                                 <a
@@ -827,8 +855,7 @@ function App() {
                           </div>
                           <div className="datapoint-meta">
                             <p>
-                              Block {dp.blockHeight} ·{' '}
-                              {formatDateTime(dp.timestamp)}
+                              Block {dp.blockHeight}
                             </p>
                             <div className="links">
                               <a
