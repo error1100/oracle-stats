@@ -24,7 +24,7 @@ Everything is defined in `src/config.ts`:
 - `ORACLE_POOLS` – array of pools. Every entry needs an id, label/description, oracle token ID (oracle NFT) and datapoint token ID (datapoint NFT). Add more pools here and they’ll show up in the UI selector automatically.
 - `REFRESH_INTERVAL_SECONDS` (per pool, optional) – override the polling cadence for the ergo-node `/info` endpoint that detects new blocks. Set to `0` to disable automatic block checks/refreshes when a pool shouldn’t auto-update.
 - `DEFAULT_POOL_ID` – which pool should be auto-selected on load
-- `DEFAULT_ERGO_NODE_URL` – ergo-node REST base
+- `DEFAULT_ERGO_NODE_URL` – ergo-node REST base used when no browser-stored node URL exists
 - `EXPLORER_UI_URL` – only used for deep-linking to Explorer pages
 - `DATAPOINT_PAGE_SIZE` – pagination window when querying ergo-node
 
@@ -34,3 +34,4 @@ Everything is defined in `src/config.ts`:
 - Oracles are identified by their compressed public keys (R4) and converted to P2PK addresses for readability
 - Derived quote/ERG prices are computed as `1e9 / datapoint`; set each pool’s `quoteTicker` to control the label (USD, XAU, …)
 - Pagination requests grab datapoint and oracle NFT boxes separately, dedupe by boxId, and keep block info cached locally for fast browsing
+- The node URL control stores its value in browser `localStorage` under `oracle-stats.nodeUrl`

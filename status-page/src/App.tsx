@@ -268,10 +268,42 @@ const mergeRefreshMarkers = (markers: RefreshBoxMarker[]) => {
 };
 
 const MIN_VISIBLE_EPOCHS = 3;
+const NODE_URL_STORAGE_KEY = 'oracle-stats.nodeUrl';
+
+const normalizeNodeUrl = (value: string) => {
+  const trimmed = value.trim();
+  return trimmed ? trimmed.replace(/\/+$/, '') : DEFAULT_ERGO_NODE_URL;
+};
+
+const loadStoredNodeUrl = () => {
+  if (typeof window === 'undefined') {
+    return DEFAULT_ERGO_NODE_URL;
+  }
+  try {
+    return normalizeNodeUrl(
+      window.localStorage.getItem(NODE_URL_STORAGE_KEY) ?? DEFAULT_ERGO_NODE_URL,
+    );
+  } catch {
+    return DEFAULT_ERGO_NODE_URL;
+  }
+};
+
+const storeNodeUrl = (value: string) => {
+  if (typeof window === 'undefined') {
+    return;
+  }
+  try {
+    window.localStorage.setItem(NODE_URL_STORAGE_KEY, value);
+  } catch (error) {
+    console.error('Failed to persist node URL', error);
+  }
+};
 
 function App() {
   const [datapoints, setDatapoints] = useState<OracleDatapoint[]>([]);
   const [selectedPoolId, setSelectedPoolId] = useState(DEFAULT_POOL_ID);
+  const [nodeUrl, setNodeUrl] = useState(loadStoredNodeUrl);
+  const [nodeUrlInput, setNodeUrlInput] = useState(nodeUrl);
   const [currentPage, setCurrentPage] = useState(0);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -291,6 +323,10 @@ function App() {
   const selectedPool: OraclePoolConfig | undefined = useMemo(
     () => ORACLE_POOLS.find((pool) => pool.id === selectedPoolId) ?? ORACLE_POOLS[0],
     [selectedPoolId],
+  );
+  const selectedPoolWithNodeUrl: OraclePoolConfig | undefined = useMemo(
+    () => (selectedPool ? { ...selectedPool, ergoNodeApiUrl: nodeUrl } : undefined),
+    [nodeUrl, selectedPool],
   );
   const quoteTicker = selectedPool?.quoteTicker ?? 'USD';
 
@@ -406,7 +442,7 @@ function App() {
       setIsLoading(true);
       setError(null);
       try {
-        if (!selectedPool) {
+        if (!selectedPoolWithNodeUrl) {
           throw new Error('No oracle pools configured');
         }
         const {
@@ -414,7 +450,7 @@ function App() {
           totals,
           pageCounts,
           refreshBoxes,
-        } = await fetchDatapointPage(selectedPool, nextPage);
+        } = await fetchDatapointPage(selectedPoolWithNodeUrl, nextPage);
         const combinedTotal = Math.max(totals.oracle, totals.datapoint);
         setTotalTransactions(combinedTotal);
         setLastFetchedCount(Math.max(pageCounts.oracle, pageCounts.datapoint));
@@ -435,7 +471,7 @@ function App() {
         setIsLoading(false);
       }
     },
-    [selectedPool],
+    [selectedPoolWithNodeUrl],
   );
 
   const refresh = useCallback(() => {
@@ -451,20 +487,20 @@ function App() {
     setRefreshMarkers([]);
     setDesiredEpochs(MIN_VISIBLE_EPOCHS);
     setOperatorAddresses([]);
-  }, [selectedPoolId]);
+  }, [nodeUrl, selectedPoolId]);
 
   useEffect(() => {
     refresh();
   }, [refresh]);
 
   useEffect(() => {
-    if (!selectedPool) {
+    if (!selectedPoolWithNodeUrl) {
       setSecondsUntilNextRefresh(null);
       return;
     }
 
     const intervalSeconds =
-      selectedPool.REFRESH_INTERVAL_SECONDS ?? DEFAULT_REFRESH_INTERVAL_SECONDS;
+      selectedPoolWithNodeUrl.REFRESH_INTERVAL_SECONDS ?? DEFAULT_REFRESH_INTERVAL_SECONDS;
     if (intervalSeconds <= 0) {
       setSecondsUntilNextRefresh(null);
       return;
@@ -506,8 +542,8 @@ function App() {
     const poll = async () => {
       try {
         const nodeUrl =
-          selectedPool.ergoNodeApiUrl ??
-          selectedPool.ergoNodeUrl ??
+          selectedPoolWithNodeUrl.ergoNodeApiUrl ??
+          selectedPoolWithNodeUrl.ergoNodeUrl ??
           DEFAULT_ERGO_NODE_URL;
         const info = await fetchNodeInfo(nodeUrl);
         if (info.fullHeight) {
@@ -535,7 +571,7 @@ function App() {
         window.clearInterval(countdownTimer);
       }
     };
-  }, [selectedPool, refresh]);
+  }, [selectedPoolWithNodeUrl, refresh]);
 
   useEffect(() => {
     if (visibleEpochs.length < desiredEpochs && hasMore && !isLoading) {
@@ -569,14 +605,14 @@ function App() {
   }, [isLoading, hasMore, visibleEpochs.length, epochsWithStatus.length]);
 
   useEffect(() => {
-    if (!selectedPool) {
+    if (!selectedPoolWithNodeUrl) {
       setOperatorAddresses([]);
       return;
     }
     let isCancelled = false;
     const loadOperators = async () => {
       try {
-        const addresses = await fetchOperatorAddresses(selectedPool);
+        const addresses = await fetchOperatorAddresses(selectedPoolWithNodeUrl);
         if (!isCancelled) {
           setOperatorAddresses(addresses);
         }
@@ -591,17 +627,17 @@ function App() {
     return () => {
       isCancelled = true;
     };
-  }, [selectedPool]);
+  }, [selectedPoolWithNodeUrl]);
 
   useEffect(() => {
-    if (!selectedPool) {
+    if (!selectedPoolWithNodeUrl) {
       setOraclePoolValue(null);
       return;
     }
     let isCancelled = false;
     const loadOracleValue = async () => {
       try {
-        const value = await fetchLatestOraclePoolValue(selectedPool);
+        const value = await fetchLatestOraclePoolValue(selectedPoolWithNodeUrl);
         if (!isCancelled) {
           setOraclePoolValue(value);
         }
@@ -616,8 +652,14 @@ function App() {
     return () => {
       isCancelled = true;
     };
-  }, [selectedPool, refreshMarkers]);
+  }, [selectedPoolWithNodeUrl, refreshMarkers]);
 
+  const commitNodeUrl = useCallback(() => {
+    const normalized = normalizeNodeUrl(nodeUrlInput);
+    setNodeUrl(normalized);
+    setNodeUrlInput(normalized);
+    storeNodeUrl(normalized);
+  }, [nodeUrlInput]);
 
   useEffect(() => {
     setExpandedEpochs((current) => {
@@ -646,32 +688,46 @@ function App() {
           <p className="eyebrow">Ergo Oracle Core status</p>
           <h1>Oracle pool stats</h1>
           <p className="subtitle">
-            Tracking oracle pool per epoch published datapoint and refresh transactions.
+            Tracking published datapoint and refresh transactions.
           </p>
         </div>
-        <div className="header-actions">
-          <div className="pool-select">
-            <label htmlFor="pool-select-input" className="label">
-              Oracle pool
-            </label>
-            <select
-              id="pool-select-input"
-              value={selectedPool?.id ?? ''}
-              onChange={(event) => {
-                setSelectedPoolId(event.target.value);
-              }}
-              disabled={isLoading}
-            >
-              {ORACLE_POOLS.map((pool) => (
-                <option key={pool.id} value={pool.id}>
-                  {pool.label}
-                </option>
-              ))}
-            </select>
-            {selectedPool?.description && (
-              <p className="muted small">{selectedPool.description}</p>
-            )}
-          </div>
+        <form
+          className="node-url-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            commitNodeUrl();
+          }}
+        >
+          <label htmlFor="node-url-input" className="label">
+            Ergo node
+          </label>
+          <input
+            id="node-url-input"
+            type="url"
+            value={nodeUrlInput}
+            onBlur={commitNodeUrl}
+            onChange={(event) => setNodeUrlInput(event.target.value)}
+            spellCheck={false}
+          />
+        </form>
+        <div className="pool-select">
+          <label htmlFor="pool-select-input" className="label">
+            Oracle pool
+          </label>
+          <select
+            id="pool-select-input"
+            value={selectedPool?.id ?? ''}
+            onChange={(event) => {
+              setSelectedPoolId(event.target.value);
+            }}
+            disabled={isLoading}
+          >
+            {ORACLE_POOLS.map((pool) => (
+              <option key={pool.id} value={pool.id}>
+                {pool.label}
+              </option>
+            ))}
+          </select>
         </div>
       </header>
 

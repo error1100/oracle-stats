@@ -217,7 +217,7 @@ export const fetchDatapointPage = async (
 export const fetchOperatorAddresses = async (pool: OraclePoolConfig): Promise<string[]> => {
   const nodeUrl = pool.ergoNodeApiUrl ?? pool.ergoNodeUrl ?? DEFAULT_ERGO_NODE_URL;
   const unspentBoxes = await fetchAllUnspentBoxesByTokenId(nodeUrl, pool.datapointTokenId);
-  const balancesByAddress = new Map<string, number>();
+  const addresses = new Set<string>();
   unspentBoxes.forEach((box) => {
     const datapointAsset = box.assets.find((asset) => asset.tokenId === pool.datapointTokenId);
     const r4 = box.additionalRegisters?.R4;
@@ -226,15 +226,12 @@ export const fetchOperatorAddresses = async (pool: OraclePoolConfig): Promise<st
     }
     try {
       const { base58 } = decodeOraclePublicKey(r4);
-      const currentAmount = balancesByAddress.get(base58) ?? 0;
-      balancesByAddress.set(base58, currentAmount + datapointAsset.amount);
+      addresses.add(base58);
     } catch (error) {
       console.error('Failed to decode operator register', { boxId: box.boxId }, error);
     }
   });
-  return Array.from(balancesByAddress.entries())
-    .filter(([, amount]) => amount === 1)
-    .map(([address]) => address);
+  return Array.from(addresses);
 };
 
 export const fetchLatestOraclePoolValue = async (

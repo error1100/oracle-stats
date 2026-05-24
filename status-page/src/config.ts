@@ -13,7 +13,7 @@ export interface OraclePoolConfig {
   refreshTokenId?: string;
 }
 
-export const DEFAULT_ERGO_NODE_URL = 'https://ergo-node.eutxo.de';
+export const DEFAULT_ERGO_NODE_URL = 'https://node-p2p.ergoplatform.com';
 
 export const ORACLE_POOLS: OraclePoolConfig[] = [
   {
