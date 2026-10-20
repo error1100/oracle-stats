@@ -1,24 +1,44 @@
 import { NetworkPrefix } from 'ergo-lib-wasm-browser';
 
+/**
+ * Positions of the pool parameters inside the refresh contract's ErgoTree constants.
+ * Defaults match oracle-core's `RefreshContractParameters` defaults.
+ */
+export interface RefreshContractConstantIndices {
+  epochLength: number;
+  minDataPoints: number;
+  maxDeviationPercent: number;
+  bufferLength: number;
+}
+
 export interface OraclePoolConfig {
   id: string;
   label: string;
   description?: string;
-  ergoNodeUrl?: string;
-  ergoNodeApiUrl?: string;
   REFRESH_INTERVAL_SECONDS?: number;
   quoteTicker?: string;
+  /** Pool NFT: the pool box carries the published rate (R4) and epoch counter (R5). */
   oraclePoolTokenId: string;
+  /** Oracle token: every oracle box (datapoint) carries one. */
   datapointTokenId: string;
+  /** Refresh NFT: its box holds the refresh contract with the pool parameters. */
   refreshTokenId?: string;
+  refreshContractConstantIndices?: RefreshContractConstantIndices;
 }
+
+export const DEFAULT_REFRESH_CONTRACT_CONSTANT_INDICES: RefreshContractConstantIndices = {
+  epochLength: 0,
+  minDataPoints: 13,
+  maxDeviationPercent: 15,
+  bufferLength: 21,
+};
 
 export const DEFAULT_ERGO_NODE_URL = 'https://node-p2p.ergoplatform.com';
 
 export const ORACLE_POOLS: OraclePoolConfig[] = [
   {
     id: 'oracle-usd',
-    label: 'Oracle USD',
+    label: 'ERG/USD',
     description: 'ERG / USD oracle pool',
     quoteTicker: 'USD',
     oraclePoolTokenId: '6a2b821b5727e85beb5e78b4efb9f0250d59cd48481d2ded2c23e91ba1d07c66',
@@ -27,7 +47,7 @@ export const ORACLE_POOLS: OraclePoolConfig[] = [
   },
   {
     id: 'oracle-xau',
-    label: 'Oracle XAU',
+    label: 'ERG/XAU',
     description: 'ERG / XAU oracle pool',
     quoteTicker: 'XAU',
     oraclePoolTokenId: '3c45f29a5165b030fdb5eaf5d81f8108f9d8f507b31487dd51f4ae08fe07cf4a',
@@ -42,4 +62,8 @@ export const EXPLORER_UI_URL = 'https://explorer.ergoplatform.com';
 
 export const NETWORK_PREFIX = NetworkPrefix.Mainnet;
 export const DATAPOINT_PAGE_SIZE = 100;
+export const POOL_BOX_PAGE_SIZE = 100;
+/** Epochs shown on load; scrolling to the bottom loads more. */
+export const INITIAL_EPOCH_COUNT = 30;
+export const EPOCH_LOAD_STEP = 20;
 export const DEFAULT_REFRESH_INTERVAL_SECONDS = 10;

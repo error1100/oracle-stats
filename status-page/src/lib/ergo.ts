@@ -17,6 +17,24 @@ export const decodeI64Register = (serializedValue: string): number => {
   return value;
 };
 
+/** Reads Int constants at the given indices of a serialized ErgoTree. */
+export const decodeErgoTreeIntConstants = (ergoTreeHex: string, indices: number[]): number[] => {
+  const tree = ergo.ErgoTree.from_base16_bytes(ergoTreeHex);
+  try {
+    return indices.map((index) => {
+      const constant = tree.get_constant(index);
+      if (!constant) {
+        throw new Error(`ErgoTree has no constant at index ${index}`);
+      }
+      const value = constant.to_i32();
+      constant.free();
+      return value;
+    });
+  } finally {
+    tree.free();
+  }
+};
+
 const toHex = (bytes: Uint8Array): string =>
   Array.from(bytes)
     .map((byte) => byte.toString(16).padStart(2, '0'))

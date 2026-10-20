@@ -23,9 +23,3 @@ export interface IndexedErgoBoxResponse {
   items: IndexedErgoBox[];
   total: number;
 }
-
-export interface BlockHeader {
-  id: string;
-  timestamp: number;
-  height: number;
-}

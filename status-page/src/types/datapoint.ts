@@ -1,23 +1,27 @@
-export type DatapointSource = 'oracleBox' | 'datapointBox';
-
+/** An oracle box carrying a datapoint (R4 oracle key, R5 epoch id, R6 rate). */
 export interface OracleDatapoint {
   boxId: string;
   txId: string;
   blockHeight: number;
+  globalIndex?: number;
   value: number;
-  ergValue: number;
   epochId: number;
   oracleAddress: string;
-  oraclePublicKeyHex: string;
   spentTransactionId?: string | null;
-  source: DatapointSource;
-  tokenId: string;
-  poolId: string;
-  globalIndex?: number;
 }
 
-export interface EpochGroup {
-  epochId: number;
+/** A pool box: created by the refresh that started `epochId`, publishing `rate`. */
+export interface PoolBoxSnapshot {
+  boxId: string;
+  txId: string;
   blockHeight: number;
-  datapoints: OracleDatapoint[];
+  epochId: number;
+  rate: number;
+}
+
+export interface PoolParameters {
+  epochLength: number;
+  minDataPoints: number;
+  maxDeviationPercent: number;
+  bufferLength: number;
 }

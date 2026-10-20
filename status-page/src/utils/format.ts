@@ -1,12 +1,19 @@
 const numberFormatter = new Intl.NumberFormat('en-US');
-const priceFormatter = new Intl.NumberFormat('en-US', {
-  minimumFractionDigits: 2,
-  maximumFractionDigits: 6,
+const quoteFormatter = new Intl.NumberFormat('en-US', {
+  minimumSignificantDigits: 6,
+  maximumSignificantDigits: 6,
 });
 
 export const formatNumber = (value: number) => numberFormatter.format(value);
 
-export const formatPrice = (value: number) => priceFormatter.format(value);
+/** Pool rates are nanoERG per quote unit; the displayed price is quote units per ERG. */
+export const quoteFromRate = (rate: number) => 1_000_000_000 / rate;
+
+export const formatQuote = (rate: number | null) =>
+  rate ? quoteFormatter.format(quoteFromRate(rate)) : '—';
+
+export const formatSignedPercent = (value: number, digits = 2) =>
+  `${value >= 0 ? '+' : '−'}${Math.abs(value).toFixed(digits)}%`;
 
 export const shortenAddress = (value: string, visible = 6) =>
   value.length <= visible * 2

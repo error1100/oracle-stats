@@ -1,50 +1,42 @@
 import type { OraclePoolConfig } from '../config';
 import {
   DATAPOINT_PAGE_SIZE,
-  DEFAULT_ERGO_NODE_URL,
+  DEFAULT_REFRESH_CONTRACT_CONSTANT_INDICES,
   EXPLORER_UI_URL,
+  POOL_BOX_PAGE_SIZE,
 } from '../config';
-import { decodeI32Register, decodeI64Register, decodeOraclePublicKey } from '../lib/ergo';
-import type { OracleDatapoint } from '../types/datapoint';
+import {
+  decodeErgoTreeIntConstants,
+  decodeI32Register,
+  decodeI64Register,
+  decodeOraclePublicKey,
+} from '../lib/ergo';
+import type { OracleDatapoint, PoolBoxSnapshot, PoolParameters } from '../types/datapoint';
 import type { IndexedErgoBox, IndexedErgoBoxResponse } from '../types/ergoNode';
-
-export interface RefreshBoxMarker {
-  boxId: string;
-  txId: string;
-  blockHeight: number;
-  globalIndex?: number;
-  value?: number;
-}
 
 export interface ErgoNodeInfo {
   name: string;
   version: string;
   fullHeight: number;
   headersHeight: number;
-  stateRoot: string;
-  previousFullHash: string;
-  stateVersion: string;
   network: string;
 }
 
-export interface DatapointPageResult {
+export interface DatapointPage {
   datapoints: OracleDatapoint[];
-  totals: {
-    oracle: number;
-    datapoint: number;
-  };
-  pageCounts: {
-    oracle: number;
-    datapoint: number;
-  };
-  refreshBoxes: RefreshBoxMarker[];
-  oracleSnapshots: OraclePoolSnapshot[];
+  /** Number of raw boxes returned (including non-datapoint oracle boxes). */
+  count: number;
+  total: number;
+  /** Lowest inclusion height among the raw boxes of this page. */
+  oldestHeight: number | null;
+  /** Box id of the oldest raw box; used to detect gaps when merging a fresh first page. */
+  oldestBoxId: string | null;
 }
 
-export interface OraclePoolSnapshot {
-  epochId: number;
-  value: number;
-  blockHeight: number;
+export interface PoolBoxPage {
+  snapshots: PoolBoxSnapshot[];
+  count: number;
+  total: number;
 }
 
 const fetchJson = async <T>(url: string): Promise<T> => {
@@ -55,37 +47,30 @@ const fetchJson = async <T>(url: string): Promise<T> => {
   return response.json() as Promise<T>;
 };
 
-const buildTokenUrl = (nodeUrl: string, tokenId: string, offset: number, limit: number) => {
-  const params = new URLSearchParams({
-    limit: limit.toString(),
-    offset: offset.toString(),
-  });
-  return `${nodeUrl}/blockchain/box/byTokenId/${tokenId}?${params.toString()}`;
-};
-
-const fetchBoxesByTokenId = async (
+const tokenUrl = (
   nodeUrl: string,
   tokenId: string,
   offset: number,
   limit: number,
-) => fetchJson<IndexedErgoBoxResponse>(buildTokenUrl(nodeUrl, tokenId, offset, limit));
-
-const buildUnspentTokenUrl = (nodeUrl: string, tokenId: string, offset: number, limit: number) => {
-  const params = new URLSearchParams({
-    limit: limit.toString(),
-    offset: offset.toString(),
-  });
-  return `${nodeUrl}/blockchain/box/unspent/byTokenId/${tokenId}?${params.toString()}`;
+  unspentOnly = false,
+) => {
+  const params = new URLSearchParams({ limit: limit.toString(), offset: offset.toString() });
+  const path = unspentOnly ? 'box/unspent/byTokenId' : 'box/byTokenId';
+  return `${nodeUrl}/blockchain/${path}/${tokenId}?${params.toString()}`;
 };
 
-type UnspentBoxResponse = IndexedErgoBoxResponse | IndexedErgoBox[];
-
+/** The unspent endpoint returns either a bare array or `{ items, total }` depending on node version. */
 const fetchUnspentBoxesByTokenId = async (
   nodeUrl: string,
   tokenId: string,
   offset: number,
   limit: number,
-) => fetchJson<UnspentBoxResponse>(buildUnspentTokenUrl(nodeUrl, tokenId, offset, limit));
+): Promise<IndexedErgoBoxResponse> => {
+  const raw = await fetchJson<IndexedErgoBoxResponse | IndexedErgoBox[]>(
+    tokenUrl(nodeUrl, tokenId, offset, limit, true),
+  );
+  return Array.isArray(raw) ? { items: raw, total: raw.length } : raw;
+};
 
 const fetchAllUnspentBoxesByTokenId = async (
   nodeUrl: string,
@@ -95,127 +80,130 @@ const fetchAllUnspentBoxesByTokenId = async (
   const items: IndexedErgoBox[] = [];
   let offset = 0;
   while (true) {
-    const responseRaw = await fetchUnspentBoxesByTokenId(nodeUrl, tokenId, offset, pageSize);
-    const response: IndexedErgoBoxResponse = Array.isArray(responseRaw)
-      ? { items: responseRaw, total: responseRaw.length }
-      : responseRaw;
+    const response = await fetchUnspentBoxesByTokenId(nodeUrl, tokenId, offset, pageSize);
     items.push(...response.items);
-    const pageLength = response.items.length;
-    const total = response.total ?? items.length;
-    if (Array.isArray(responseRaw) || pageLength === 0 || items.length >= total) {
-      break;
+    if (response.items.length < pageSize || items.length >= response.total) {
+      return items;
     }
-    offset += pageLength;
+    offset += response.items.length;
   }
-  return items;
 };
 
-const decodeOracleDatapoint = (
-  poolId: string,
-  tokenId: string,
-  source: OracleDatapoint['source'],
-  box: IndexedErgoBox,
-): OracleDatapoint | undefined => {
-  const registers = box.additionalRegisters ?? {};
-  const r4 = registers.R4;
-  const r5 = registers.R5;
-  const r6 = registers.R6;
-  if (!r4 || !r5 || !r6) {
+const boxHeight = (box: IndexedErgoBox) => box.inclusionHeight ?? box.creationHeight ?? 0;
+
+const decodeDatapoint = (box: IndexedErgoBox): OracleDatapoint | undefined => {
+  const { R4, R5, R6 } = box.additionalRegisters ?? {};
+  // Oracle boxes produced by a refresh carry only R4; they hold no datapoint.
+  if (!R4 || !R5 || !R6) {
     return undefined;
   }
-
   try {
-    const { base58, publicKeyHex } = decodeOraclePublicKey(r4);
-    const epochId = decodeI32Register(r5);
-    const datapoint = decodeI64Register(r6);
-    const blockHeight = box.inclusionHeight ?? box.creationHeight ?? 0;
     return {
       boxId: box.boxId,
       txId: box.transactionId,
-      blockHeight,
-      value: datapoint,
-      ergValue: box.value / 1_000_000_000,
-      epochId,
-      oracleAddress: base58,
-      oraclePublicKeyHex: publicKeyHex,
-      spentTransactionId: box.spentTransactionId ?? undefined,
-      source,
-      tokenId,
-      poolId,
+      blockHeight: boxHeight(box),
       globalIndex: box.globalIndex,
+      value: decodeI64Register(R6),
+      epochId: decodeI32Register(R5),
+      oracleAddress: decodeOraclePublicKey(R4).base58,
+      spentTransactionId: box.spentTransactionId ?? null,
     };
   } catch (error) {
-    console.error('Failed to decode oracle datapoint', error, {
-      boxId: box.boxId,
-      source,
-      tokenId,
-    });
+    console.error('Failed to decode oracle datapoint', { boxId: box.boxId }, error);
     return undefined;
   }
 };
 
+const decodePoolBox = (box: IndexedErgoBox): PoolBoxSnapshot | undefined => {
+  const { R4, R5 } = box.additionalRegisters ?? {};
+  if (!R4 || !R5) {
+    return undefined;
+  }
+  try {
+    return {
+      boxId: box.boxId,
+      txId: box.transactionId,
+      blockHeight: boxHeight(box),
+      rate: decodeI64Register(R4),
+      epochId: decodeI32Register(R5),
+    };
+  } catch (error) {
+    console.error('Failed to decode pool box', { boxId: box.boxId }, error);
+    return undefined;
+  }
+};
+
+/** Oracle boxes, newest first. */
 export const fetchDatapointPage = async (
+  nodeUrl: string,
   pool: OraclePoolConfig,
   page: number,
-  pageSize = DATAPOINT_PAGE_SIZE,
-): Promise<DatapointPageResult> => {
-  const nodeUrl = pool.ergoNodeApiUrl ?? pool.ergoNodeUrl ?? DEFAULT_ERGO_NODE_URL;
-  const offset = page * pageSize;
-  const refreshTokenId = pool.refreshTokenId;
-  const [oracleBoxes, datapointBoxes, refreshBoxesResponse] = await Promise.all([
-    fetchBoxesByTokenId(nodeUrl, pool.oraclePoolTokenId, offset, pageSize),
-    fetchBoxesByTokenId(nodeUrl, pool.datapointTokenId, offset, pageSize),
-    refreshTokenId
-      ? fetchBoxesByTokenId(nodeUrl, refreshTokenId, offset, pageSize)
-      : Promise.resolve<IndexedErgoBoxResponse>({ items: [], total: 0 }),
-  ]);
-
-  const oracleData = oracleBoxes.items
-    .map((box) => decodeOracleDatapoint(pool.id, pool.oraclePoolTokenId, 'oracleBox', box))
-    .filter((box): box is OracleDatapoint => Boolean(box));
-  const datapointData = datapointBoxes.items
-    .map((box) => decodeOracleDatapoint(pool.id, pool.datapointTokenId, 'datapointBox', box))
-    .filter((box): box is OracleDatapoint => Boolean(box));
-
-  const oracleSnapshots = oracleBoxes.items
-    .map((box) => decodeOraclePoolSnapshot(box))
-    .filter((snapshot): snapshot is OraclePoolSnapshot => Boolean(snapshot));
-
-  const deduped = new Map<string, OracleDatapoint>();
-  [...oracleData, ...datapointData].forEach((dp) => {
-    const existing = deduped.get(dp.boxId);
-    if (!existing || (existing.source === 'oracleBox' && dp.source === 'datapointBox')) {
-      deduped.set(dp.boxId, dp);
-    }
-  });
-
-  const sorted = Array.from(deduped.values()).sort((a, b) => b.blockHeight - a.blockHeight);
-
-  const refreshMarkersBase: RefreshBoxMarker[] = refreshBoxesResponse.items.map((box) => ({
-    boxId: box.boxId,
-    txId: box.transactionId,
-    blockHeight: box.inclusionHeight ?? box.creationHeight ?? 0,
-    globalIndex: box.globalIndex,
-    value: box.additionalRegisters?.R4 ? decodeI64Register(box.additionalRegisters.R4) : undefined,
-  }));
-
+): Promise<DatapointPage> => {
+  const response = await fetchJson<IndexedErgoBoxResponse>(
+    tokenUrl(nodeUrl, pool.datapointTokenId, page * DATAPOINT_PAGE_SIZE, DATAPOINT_PAGE_SIZE),
+  );
+  const oldest = response.items.reduce<IndexedErgoBox | null>(
+    (min, box) => (!min || boxHeight(box) < boxHeight(min) ? box : min),
+    null,
+  );
   return {
-    datapoints: sorted,
-    totals: {
-      oracle: oracleBoxes.total,
-      datapoint: datapointBoxes.total,
-    },
-    pageCounts: {
-      oracle: oracleBoxes.items.length,
-      datapoint: datapointBoxes.items.length,
-    },
-    refreshBoxes: refreshMarkersBase,
-    oracleSnapshots,
+    datapoints: response.items
+      .map(decodeDatapoint)
+      .filter((dp): dp is OracleDatapoint => Boolean(dp)),
+    count: response.items.length,
+    total: response.total,
+    oldestHeight: oldest ? boxHeight(oldest) : null,
+    oldestBoxId: oldest?.boxId ?? null,
   };
 };
 
-export const fetchOperatorAddresses = async (pool: OraclePoolConfig): Promise<string[]> => {
-  const nodeUrl = pool.ergoNodeApiUrl ?? pool.ergoNodeUrl ?? DEFAULT_ERGO_NODE_URL;
+/** Pool box history, newest first: one box per epoch. */
+export const fetchPoolBoxPage = async (
+  nodeUrl: string,
+  pool: OraclePoolConfig,
+  page: number,
+): Promise<PoolBoxPage> => {
+  const response = await fetchJson<IndexedErgoBoxResponse>(
+    tokenUrl(nodeUrl, pool.oraclePoolTokenId, page * POOL_BOX_PAGE_SIZE, POOL_BOX_PAGE_SIZE),
+  );
+  return {
+    snapshots: response.items
+      .map(decodePoolBox)
+      .filter((snapshot): snapshot is PoolBoxSnapshot => Boolean(snapshot)),
+    count: response.items.length,
+    total: response.total,
+  };
+};
+
+/** Reads epoch length, quorum, deviation limit and buffer from the refresh contract. */
+export const fetchPoolParameters = async (
+  nodeUrl: string,
+  pool: OraclePoolConfig,
+): Promise<PoolParameters | null> => {
+  if (!pool.refreshTokenId) {
+    return null;
+  }
+  const { items } = await fetchUnspentBoxesByTokenId(nodeUrl, pool.refreshTokenId, 0, 1);
+  const refreshBox = items[0];
+  if (!refreshBox) {
+    return null;
+  }
+  const indices = pool.refreshContractConstantIndices ?? DEFAULT_REFRESH_CONTRACT_CONSTANT_INDICES;
+  const [epochLength, minDataPoints, maxDeviationPercent, bufferLength] =
+    decodeErgoTreeIntConstants(refreshBox.ergoTree, [
+      indices.epochLength,
+      indices.minDataPoints,
+      indices.maxDeviationPercent,
+      indices.bufferLength,
+    ]);
+  return { epochLength, minDataPoints, maxDeviationPercent, bufferLength };
+};
+
+/** Addresses of every oracle currently holding an oracle token. */
+export const fetchOperatorAddresses = async (
+  nodeUrl: string,
+  pool: OraclePoolConfig,
+): Promise<string[]> => {
   const unspentBoxes = await fetchAllUnspentBoxesByTokenId(nodeUrl, pool.datapointTokenId);
   const addresses = new Set<string>();
   unspentBoxes.forEach((box) => {
@@ -225,8 +213,7 @@ export const fetchOperatorAddresses = async (pool: OraclePoolConfig): Promise<st
       return;
     }
     try {
-      const { base58 } = decodeOraclePublicKey(r4);
-      addresses.add(base58);
+      addresses.add(decodeOraclePublicKey(r4).base58);
     } catch (error) {
       console.error('Failed to decode operator register', { boxId: box.boxId }, error);
     }
@@ -234,58 +221,12 @@ export const fetchOperatorAddresses = async (pool: OraclePoolConfig): Promise<st
   return Array.from(addresses);
 };
 
-export const fetchLatestOraclePoolValue = async (
-  pool: OraclePoolConfig,
-): Promise<number | null> => {
-  const nodeUrl = pool.ergoNodeApiUrl ?? pool.ergoNodeUrl ?? DEFAULT_ERGO_NODE_URL;
-  const boxesRaw = await fetchUnspentBoxesByTokenId(nodeUrl, pool.oraclePoolTokenId, 0, 50);
-  const response: IndexedErgoBoxResponse = Array.isArray(boxesRaw)
-    ? { items: boxesRaw, total: boxesRaw.length }
-    : boxesRaw;
-  if (!response.items.length) {
-    return null;
-  }
-  const box = [...response.items].sort(
-    (a, b) =>
-      (b.inclusionHeight ?? b.creationHeight ?? 0) -
-      (a.inclusionHeight ?? a.creationHeight ?? 0),
-  )[0];
-  const registers = box?.additionalRegisters ?? {};
-  if (!registers.R4 || !registers.R5) {
-    return null;
-  }
-  try {
-    const value = decodeI64Register(registers.R4);
-    return value;
-  } catch (error) {
-    console.error('Failed to decode oracle pool value', { boxId: box.boxId }, error);
-    return null;
-  }
-};
-
-export const fetchNodeInfo = async (baseUrl: string): Promise<ErgoNodeInfo> =>
-  fetchJson<ErgoNodeInfo>(`${baseUrl}/info`);
+export const fetchNodeInfo = async (nodeUrl: string): Promise<ErgoNodeInfo> =>
+  fetchJson<ErgoNodeInfo>(`${nodeUrl}/info`);
 
 export const buildExplorerLinks = {
   transaction: (txId: string) => `${EXPLORER_UI_URL}/en/transactions/${txId}`,
   box: (boxId: string) => `${EXPLORER_UI_URL}/en/box/${boxId}`,
   address: (address: string) => `${EXPLORER_UI_URL}/en/addresses/${address}`,
   token: (tokenId: string) => `${EXPLORER_UI_URL}/en/token/${tokenId}`,
-};
-const decodeOraclePoolSnapshot = (box: IndexedErgoBox): OraclePoolSnapshot | undefined => {
-  const registers = box.additionalRegisters ?? {};
-  const r4 = registers.R4;
-  const r5 = registers.R5;
-  if (!r4 || !r5) {
-    return undefined;
-  }
-  try {
-    const value = decodeI64Register(r4);
-    const epochId = decodeI32Register(r5);
-    const blockHeight = box.inclusionHeight ?? box.creationHeight ?? 0;
-    return { value, epochId, blockHeight };
-  } catch (error) {
-    console.error('Failed to decode oracle pool snapshot', { boxId: box.boxId }, error);
-    return undefined;
-  }
 };
