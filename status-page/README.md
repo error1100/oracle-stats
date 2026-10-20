@@ -34,13 +34,23 @@ Everything is defined in `src/config.ts`:
 
 - `ORACLE_POOLS`: array of pools. Each entry needs an id, a label, the pool NFT (`oraclePoolTokenId`), the oracle token (`datapointTokenId`), and the refresh NFT (`refreshTokenId`, used to read the pool parameters). New entries show up as tabs automatically.
 - `refreshContractConstantIndices` (per pool, optional): positions of epoch length, min datapoints, max deviation, and buffer inside the refresh contract's ErgoTree constants. Defaults follow oracle-core (`0`, `13`, `15`, `21`).
-- `REFRESH_INTERVAL_SECONDS` (per pool, optional): polling cadence for the node `/info` endpoint that detects new blocks. `0` disables auto-refresh.
+- `DEFAULT_AUTO_REFRESH` / `DEFAULT_REFRESH_INTERVAL_SECONDS`: whether the node is polled for new blocks, and how often (default: on, every 30 s; `MIN_REFRESH_INTERVAL_SECONDS` is the lower bound).
 - `DEFAULT_POOL_ID`: the pool selected on load.
 - `DEFAULT_ERGO_NODE_URL`: node used when no node URL has been saved in the browser.
 - `INITIAL_EPOCH_COUNT` / `EPOCH_LOAD_STEP`: epochs shown on load, and how many more load when you scroll to the bottom.
 - `EXPLORER_UI_URL`: used only for deep links.
 
-The node URL can be changed in the UI through the gear button. The node must expose the blockchain indexer API. The value is stored in `localStorage` under `oracle-stats.nodeUrl`.
+### Settings (gear button)
+
+- **Ergo node URL**: the node must expose the blockchain indexer API.
+- **Auto-refresh**: on/off and the interval in seconds. When off, the node is queried once on load.
+- **Clear cache**: deletes the cached history for all pools and nodes and reloads from the node.
+
+Settings are stored in `localStorage` under `oracle-stats.nodeUrl`, `oracle-stats.autoRefresh` and `oracle-stats.refreshIntervalSeconds`.
+
+### Cache
+
+Loaded history (oracle boxes, pool boxes, pool parameters, operators) is kept in `localStorage` per pool and node (`oracle-stats.cache.v1:<pool>:<node>`). A reload or pool switch renders from the cache right away, then fetches only the newest page to catch up. If that page doesn't connect to the cached history (for example, the tab was closed for many blocks), the cached history is dropped and loaded again. The cache keeps at most the newest 3000 datapoints and 1000 pool boxes.
 
 ### Implementation notes
 

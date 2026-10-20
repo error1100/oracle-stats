@@ -1,4 +1,5 @@
 import type { OraclePoolConfig } from '../config';
+import type { Settings } from '../settings';
 import { usePoolData } from '../hooks/usePoolData';
 import { EpochLedger } from './EpochLedger';
 import { HealthCards } from './HealthCards';
@@ -9,13 +10,21 @@ interface PoolDashboardProps {
   pools: OraclePoolConfig[];
   pool: OraclePoolConfig;
   onSelectPool: (poolId: string) => void;
-  nodeUrl: string;
-  onNodeUrlChange: (url: string) => void;
+  settings: Settings;
+  onSettingsChange: (settings: Settings) => void;
+  onClearCache: () => void;
 }
 
 /** Mounted with a key per pool + node, so switching either starts from a clean slate. */
-export const PoolDashboard = ({ pools, pool, onSelectPool, nodeUrl, onNodeUrlChange }: PoolDashboardProps) => {
-  const data = usePoolData(pool, nodeUrl);
+export const PoolDashboard = ({
+  pools,
+  pool,
+  onSelectPool,
+  settings,
+  onSettingsChange,
+  onClearCache,
+}: PoolDashboardProps) => {
+  const data = usePoolData(pool, settings.nodeUrl, settings.autoRefresh ? settings.refreshIntervalSeconds : null);
   const { ledger, params } = data;
   const currentEpoch = ledger.epochs[0];
   const quoteTicker = pool.quoteTicker ?? 'USD';
@@ -32,8 +41,9 @@ export const PoolDashboard = ({ pools, pool, onSelectPool, nodeUrl, onNodeUrlCha
         secondsUntilNextCheck={data.secondsUntilNextCheck}
         isLoading={data.isLoading}
         error={data.error}
-        nodeUrl={nodeUrl}
-        onNodeUrlChange={onNodeUrlChange}
+        settings={settings}
+        onSettingsChange={onSettingsChange}
+        onClearCache={onClearCache}
       />
       {data.error && <div className="error-banner">{data.error}</div>}
       <HealthCards ledger={ledger} params={params} registeredCount={data.operators.length} />

@@ -29,8 +29,6 @@ export interface DatapointPage {
   total: number;
   /** Lowest inclusion height among the raw boxes of this page. */
   oldestHeight: number | null;
-  /** Box id of the oldest raw box; used to detect gaps when merging a fresh first page. */
-  oldestBoxId: string | null;
 }
 
 export interface PoolBoxPage {
@@ -142,18 +140,14 @@ export const fetchDatapointPage = async (
   const response = await fetchJson<IndexedErgoBoxResponse>(
     tokenUrl(nodeUrl, pool.datapointTokenId, page * DATAPOINT_PAGE_SIZE, DATAPOINT_PAGE_SIZE),
   );
-  const oldest = response.items.reduce<IndexedErgoBox | null>(
-    (min, box) => (!min || boxHeight(box) < boxHeight(min) ? box : min),
-    null,
-  );
+  const heights = response.items.map(boxHeight);
   return {
     datapoints: response.items
       .map(decodeDatapoint)
       .filter((dp): dp is OracleDatapoint => Boolean(dp)),
     count: response.items.length,
     total: response.total,
-    oldestHeight: oldest ? boxHeight(oldest) : null,
-    oldestBoxId: oldest?.boxId ?? null,
+    oldestHeight: heights.length ? Math.min(...heights) : null,
   };
 };
 

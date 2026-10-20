@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import {
   DATAPOINT_PAGE_SIZE,
-  DEFAULT_REFRESH_INTERVAL_SECONDS,
   EPOCH_LOAD_STEP,
   INITIAL_EPOCH_COUNT,
   POOL_BOX_PAGE_SIZE,
@@ -17,6 +16,7 @@ import {
   type DatapointPage,
   type PoolBoxPage,
 } from '../services/datapointService';
+import { loadPoolCache, savePoolCache, type PoolCache } from '../services/poolCache';
 import type { OracleDatapoint, PoolBoxSnapshot, PoolParameters } from '../types/datapoint';
 
 interface PagedState {
@@ -37,7 +37,7 @@ type PagedAction =
   | { type: 'datapoints'; generation: number; pageIndex: number; page: DatapointPage }
   | { type: 'poolBoxes'; generation: number; pageIndex: number; page: PoolBoxPage };
 
-const initialState: PagedState = {
+const emptyState: PagedState = {
   generation: 0,
   datapoints: new Map(),
   datapointPages: 0,
@@ -50,6 +50,67 @@ const initialState: PagedState = {
   lastPoolPageCount: 0,
 };
 
+/** Cap on persisted history so the cache stays well inside the localStorage quota. */
+const MAX_CACHED_DATAPOINTS = 3000;
+const MAX_CACHED_POOL_BOXES = 1000;
+
+const stateFromCache = (cache: PoolCache | null): PagedState =>
+  cache
+    ? {
+        ...emptyState,
+        datapoints: new Map(cache.datapoints.map((dp) => [dp.boxId, dp])),
+        datapointPages: cache.datapointPages,
+        datapointTotal: cache.datapointTotal,
+        lastDatapointPageCount: cache.lastDatapointPageCount,
+        datapointsFromHeight: cache.datapointsFromHeight,
+        poolBoxes: new Map(cache.poolBoxes.map((box) => [box.boxId, box])),
+        poolPages: cache.poolPages,
+        poolTotal: cache.poolTotal,
+        lastPoolPageCount: cache.lastPoolPageCount,
+      }
+    : emptyState;
+
+/**
+ * Keeps the newest history only. After trimming, coverage starts above the cutoff height and the
+ * page counters are lowered to the kept count: resuming at a smaller offset re-fetches some boxes
+ * (merged by box id) but can never skip any.
+ */
+const cacheFromState = (
+  state: PagedState,
+  params: PoolParameters | null,
+  operators: string[],
+): PoolCache => {
+  let datapoints = [...state.datapoints.values()].sort((a, b) => b.blockHeight - a.blockHeight);
+  let { datapointPages, lastDatapointPageCount, datapointsFromHeight } = state;
+  if (datapoints.length > MAX_CACHED_DATAPOINTS) {
+    const cutoff = datapoints[MAX_CACHED_DATAPOINTS].blockHeight;
+    datapoints = datapoints.filter((dp) => dp.blockHeight > cutoff);
+    datapointsFromHeight = cutoff;
+    datapointPages = Math.floor(datapoints.length / DATAPOINT_PAGE_SIZE);
+    lastDatapointPageCount = DATAPOINT_PAGE_SIZE;
+  }
+  let poolBoxes = [...state.poolBoxes.values()].sort((a, b) => b.blockHeight - a.blockHeight);
+  let { poolPages, lastPoolPageCount } = state;
+  if (poolBoxes.length > MAX_CACHED_POOL_BOXES) {
+    poolBoxes = poolBoxes.slice(0, MAX_CACHED_POOL_BOXES);
+    poolPages = Math.floor(poolBoxes.length / POOL_BOX_PAGE_SIZE);
+    lastPoolPageCount = POOL_BOX_PAGE_SIZE;
+  }
+  return {
+    datapoints,
+    datapointPages,
+    datapointTotal: state.datapointTotal,
+    lastDatapointPageCount,
+    datapointsFromHeight,
+    poolBoxes,
+    poolPages,
+    poolTotal: state.poolTotal,
+    lastPoolPageCount,
+    params,
+    operators,
+  };
+};
+
 /** A box only ever moves from unspent to spent, so keep whichever copy knows the spender. */
 const mergeDatapoint = (existing: OracleDatapoint | undefined, incoming: OracleDatapoint) =>
   existing?.spentTransactionId ? existing : incoming;
@@ -58,15 +119,20 @@ const reducer = (state: PagedState, action: PagedAction): PagedState => {
   if (action.generation !== state.generation) {
     return state;
   }
-  // A refreshed first page that shares no box with loaded history means boxes were skipped:
-  // drop the history and continue paging from the fresh page.
+  // A refreshed first page that doesn't reach down to the newest loaded datapoint means boxes in
+  // between were never seen: drop the history and continue paging from the fresh page.
   if (action.type === 'datapoints') {
     const { page, pageIndex } = action;
+    let newestLoaded: number | null = null;
+    for (const dp of state.datapoints.values()) {
+      if (newestLoaded === null || dp.blockHeight > newestLoaded) newestLoaded = dp.blockHeight;
+    }
     const gap =
       pageIndex === 0 &&
-      state.datapoints.size > 0 &&
-      page.oldestBoxId !== null &&
-      !state.datapoints.has(page.oldestBoxId);
+      newestLoaded !== null &&
+      page.count === DATAPOINT_PAGE_SIZE &&
+      page.oldestHeight !== null &&
+      page.oldestHeight > newestLoaded;
     const datapoints = gap ? new Map<string, OracleDatapoint>() : new Map(state.datapoints);
     page.datapoints.forEach((dp) => datapoints.set(dp.boxId, mergeDatapoint(datapoints.get(dp.boxId), dp)));
     const fromHeights = [gap ? null : state.datapointsFromHeight, page.oldestHeight].filter(
@@ -113,11 +179,20 @@ export interface PoolData {
   loadMore: () => void;
 }
 
-/** Loads and live-updates one pool's history. Mount with a `key` per pool + node to reset. */
-export const usePoolData = (pool: OraclePoolConfig, nodeUrl: string): PoolData => {
-  const [state, dispatch] = useReducer(reducer, initialState);
-  const [params, setParams] = useState<PoolParameters | null>(null);
-  const [operators, setOperators] = useState<string[]>([]);
+/**
+ * Loads and live-updates one pool's history. Mount with a `key` per pool + node to reset.
+ * `refreshIntervalSeconds` sets how often the node is checked for a new block; `null` disables
+ * auto-refresh (the node is still queried once for the current height).
+ */
+export const usePoolData = (
+  pool: OraclePoolConfig,
+  nodeUrl: string,
+  refreshIntervalSeconds: number | null,
+): PoolData => {
+  const [cached] = useState(() => loadPoolCache(nodeUrl, pool.id));
+  const [state, dispatch] = useReducer(reducer, cached, stateFromCache);
+  const [params, setParams] = useState<PoolParameters | null>(cached?.params ?? null);
+  const [operators, setOperators] = useState<string[]>(cached?.operators ?? []);
   const [height, setHeight] = useState<number | null>(null);
   const [secondsUntilNextCheck, setSecondsUntilNextCheck] = useState<number | null>(null);
   const [inFlight, setInFlight] = useState(0);
@@ -168,19 +243,28 @@ export const usePoolData = (pool: OraclePoolConfig, nodeUrl: string): PoolData =
     run(async () => setOperators(await fetchOperatorAddresses(nodeUrl, pool)));
   }, [loadDatapoints, loadPoolBoxes, nodeUrl, pool, run]);
 
+  // Persist loaded history (debounced) so the next visit starts from it.
+  useEffect(() => {
+    if (!state.datapointPages && !state.poolPages) return;
+    const timer = window.setTimeout(
+      () => savePoolCache(nodeUrl, pool.id, cacheFromState(state, params, operators)),
+      1000,
+    );
+    return () => window.clearTimeout(timer);
+  }, [nodeUrl, operators, params, pool.id, state]);
+
   // Poll the node; on every new block re-fetch the newest pages and merge them in.
   useEffect(() => {
-    const intervalSeconds = pool.REFRESH_INTERVAL_SECONDS ?? DEFAULT_REFRESH_INTERVAL_SECONDS;
-    if (intervalSeconds <= 0) {
-      return;
-    }
+    const autoRefresh = refreshIntervalSeconds !== null;
     let cancelled = false;
     let lastHeight: number | null = null;
     let pollTimer: number | undefined;
     let nextPollAt = Date.now();
-    const countdown = window.setInterval(() => {
-      setSecondsUntilNextCheck(Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1000)));
-    }, 1000);
+    const countdown = autoRefresh
+      ? window.setInterval(() => {
+          setSecondsUntilNextCheck(Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1000)));
+        }, 1000)
+      : undefined;
 
     const poll = async () => {
       try {
@@ -195,9 +279,9 @@ export const usePoolData = (pool: OraclePoolConfig, nodeUrl: string): PoolData =
       } catch (err) {
         console.error('Failed to poll ergo node info', err);
       } finally {
-        if (!cancelled) {
-          nextPollAt = Date.now() + intervalSeconds * 1000;
-          pollTimer = window.setTimeout(poll, intervalSeconds * 1000);
+        if (!cancelled && autoRefresh) {
+          nextPollAt = Date.now() + refreshIntervalSeconds * 1000;
+          pollTimer = window.setTimeout(poll, refreshIntervalSeconds * 1000);
         }
       }
     };
@@ -207,7 +291,7 @@ export const usePoolData = (pool: OraclePoolConfig, nodeUrl: string): PoolData =
       window.clearTimeout(pollTimer);
       window.clearInterval(countdown);
     };
-  }, [loadDatapoints, loadPoolBoxes, nodeUrl, pool.REFRESH_INTERVAL_SECONDS]);
+  }, [loadDatapoints, loadPoolBoxes, nodeUrl, refreshIntervalSeconds]);
 
   const allDatapointsLoaded =
     state.datapointTotal !== null &&
@@ -273,5 +357,15 @@ export const usePoolData = (pool: OraclePoolConfig, nodeUrl: string): PoolData =
     if (ledger.epochs.length >= epochLimit) setEpochLimit((limit) => limit + EPOCH_LOAD_STEP);
   }, [epochLimit, ledger.epochs.length]);
 
-  return { ledger, params, operators, height, secondsUntilNextCheck, isLoading, error, hasMore, loadMore };
+  return {
+    ledger,
+    params,
+    operators,
+    height,
+    secondsUntilNextCheck: refreshIntervalSeconds !== null ? secondsUntilNextCheck : null,
+    isLoading,
+    error,
+    hasMore,
+    loadMore,
+  };
 };

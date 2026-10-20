@@ -1,23 +1,15 @@
 import { useState } from 'react';
 import './App.css';
-import { DEFAULT_ERGO_NODE_URL, DEFAULT_POOL_ID, ORACLE_POOLS } from './config';
+import { DEFAULT_POOL_ID, ORACLE_POOLS } from './config';
 import { PoolDashboard } from './components/PoolDashboard';
-
-const NODE_URL_STORAGE_KEY = 'oracle-stats.nodeUrl';
-
-const normalizeNodeUrl = (value: string) => value.trim().replace(/\/+$/, '') || DEFAULT_ERGO_NODE_URL;
-
-const loadStoredNodeUrl = () => {
-  try {
-    return normalizeNodeUrl(window.localStorage.getItem(NODE_URL_STORAGE_KEY) ?? '');
-  } catch {
-    return DEFAULT_ERGO_NODE_URL;
-  }
-};
+import { clearPoolCaches } from './services/poolCache';
+import { loadSettings, normalizeSettings, saveSettings } from './settings';
 
 function App() {
   const [selectedPoolId, setSelectedPoolId] = useState(DEFAULT_POOL_ID);
-  const [nodeUrl, setNodeUrl] = useState(loadStoredNodeUrl);
+  const [settings, setSettings] = useState(loadSettings);
+  /** Bumped when the cache is cleared, remounting the dashboard so it reloads from the node. */
+  const [cacheGeneration, setCacheGeneration] = useState(0);
   const pool = ORACLE_POOLS.find((candidate) => candidate.id === selectedPoolId) ?? ORACLE_POOLS[0];
 
   if (!pool) {
@@ -26,19 +18,19 @@ function App() {
 
   return (
     <PoolDashboard
-      key={`${pool.id}|${nodeUrl}`}
+      key={`${pool.id}|${settings.nodeUrl}|${cacheGeneration}`}
       pools={ORACLE_POOLS}
       pool={pool}
       onSelectPool={setSelectedPoolId}
-      nodeUrl={nodeUrl}
-      onNodeUrlChange={(value) => {
-        const normalized = normalizeNodeUrl(value);
-        setNodeUrl(normalized);
-        try {
-          window.localStorage.setItem(NODE_URL_STORAGE_KEY, normalized);
-        } catch (error) {
-          console.error('Failed to persist node URL', error);
-        }
+      settings={settings}
+      onSettingsChange={(next) => {
+        const normalized = normalizeSettings(next);
+        setSettings(normalized);
+        saveSettings(normalized);
+      }}
+      onClearCache={() => {
+        clearPoolCaches();
+        setCacheGeneration((value) => value + 1);
       }}
     />
   );

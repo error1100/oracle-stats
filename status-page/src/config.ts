@@ -15,7 +15,6 @@ export interface OraclePoolConfig {
   id: string;
   label: string;
   description?: string;
-  REFRESH_INTERVAL_SECONDS?: number;
   quoteTicker?: string;
   /** Pool NFT: the pool box carries the published rate (R4) and epoch counter (R5). */
   oraclePoolTokenId: string;
@@ -66,4 +65,7 @@ export const POOL_BOX_PAGE_SIZE = 100;
 /** Epochs shown on load; scrolling to the bottom loads more. */
 export const INITIAL_EPOCH_COUNT = 30;
 export const EPOCH_LOAD_STEP = 20;
-export const DEFAULT_REFRESH_INTERVAL_SECONDS = 10;
+/** Auto-refresh defaults; both can be changed in the UI settings and are saved in the browser. */
+export const DEFAULT_AUTO_REFRESH = true;
+export const DEFAULT_REFRESH_INTERVAL_SECONDS = 30;
+export const MIN_REFRESH_INTERVAL_SECONDS = 5;

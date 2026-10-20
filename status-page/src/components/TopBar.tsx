@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { DEFAULT_ERGO_NODE_URL, type OraclePoolConfig } from '../config';
+import { DEFAULT_ERGO_NODE_URL, MIN_REFRESH_INTERVAL_SECONDS, type OraclePoolConfig } from '../config';
+import { DEFAULT_SETTINGS, type Settings } from '../settings';
 import { formatNumber, formatQuote } from '../utils/format';
 
 interface TopBarProps {
@@ -12,16 +13,18 @@ interface TopBarProps {
   secondsUntilNextCheck: number | null;
   isLoading: boolean;
   error: string | null;
-  nodeUrl: string;
-  onNodeUrlChange: (url: string) => void;
+  settings: Settings;
+  onSettingsChange: (settings: Settings) => void;
+  onClearCache: () => void;
 }
 
-const NodeSettings = ({
-  nodeUrl,
-  onNodeUrlChange,
-}: Pick<TopBarProps, 'nodeUrl' | 'onNodeUrlChange'>) => {
+const SettingsMenu = ({
+  settings,
+  onSettingsChange,
+  onClearCache,
+}: Pick<TopBarProps, 'settings' | 'onSettingsChange' | 'onClearCache'>) => {
   const [open, setOpen] = useState(false);
-  const [draft, setDraft] = useState(nodeUrl);
+  const [draft, setDraft] = useState(settings);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -49,7 +52,7 @@ const NodeSettings = ({
         aria-label="Settings"
         title="Settings"
         onClick={() => {
-          setDraft(nodeUrl);
+          setDraft(settings);
           setOpen((value) => !value);
         }}
       >
@@ -63,7 +66,7 @@ const NodeSettings = ({
           className="settings-panel"
           onSubmit={(event) => {
             event.preventDefault();
-            onNodeUrlChange(draft);
+            onSettingsChange(draft);
             setOpen(false);
           }}
         >
@@ -71,16 +74,49 @@ const NodeSettings = ({
           <input
             id="node-url-input"
             type="url"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
+            value={draft.nodeUrl}
+            onChange={(event) => setDraft({ ...draft, nodeUrl: event.target.value })}
             spellCheck={false}
             autoFocus
             placeholder={DEFAULT_ERGO_NODE_URL}
           />
-          <p className="note">Needs the blockchain indexer API. Saved in this browser.</p>
+          <p className="note">Needs the blockchain indexer API.</p>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={draft.autoRefresh}
+              onChange={(event) => setDraft({ ...draft, autoRefresh: event.target.checked })}
+            />
+            Auto-refresh every
+            <input
+              id="refresh-interval-input"
+              className="interval"
+              type="number"
+              min={MIN_REFRESH_INTERVAL_SECONDS}
+              step={1}
+              value={draft.refreshIntervalSeconds}
+              disabled={!draft.autoRefresh}
+              onChange={(event) => setDraft({ ...draft, refreshIntervalSeconds: event.target.valueAsNumber })}
+            />
+            s
+          </label>
+          <p className="note">Checks the node for a new block and merges new datapoints. Settings are saved in this browser.</p>
+          <div className="settings-cache">
+            <span className="note">Loaded epochs are cached in this browser.</span>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => {
+                onClearCache();
+                setOpen(false);
+              }}
+            >
+              Clear cache
+            </button>
+          </div>
           <div className="settings-actions">
-            <button type="button" className="ghost" onClick={() => setDraft(DEFAULT_ERGO_NODE_URL)}>
-              Default
+            <button type="button" className="ghost" onClick={() => setDraft(DEFAULT_SETTINGS)}>
+              Defaults
             </button>
             <button type="submit" className="primary">
               Save
@@ -102,8 +138,9 @@ export const TopBar = ({
   secondsUntilNextCheck,
   isLoading,
   error,
-  nodeUrl,
-  onNodeUrlChange,
+  settings,
+  onSettingsChange,
+  onClearCache,
 }: TopBarProps) => (
   <header className="topbar">
     <nav className="pool-tabs" aria-label="Oracle pool">
@@ -125,16 +162,18 @@ export const TopBar = ({
     <span className="meta">
       rate {rate ?? '—'} · epoch {epochId ?? '—'} · block {height !== null ? formatNumber(height) : '—'}
     </span>
-    <span className="live" title={error ?? `Node: ${nodeUrl}`}>
-      <span className={`live-dot ${error ? 'down' : ''}`} />
+    <span className="live" title={error ?? `Node: ${settings.nodeUrl}`}>
+      <span className={`live-dot ${error ? 'down' : settings.autoRefresh ? '' : 'paused'}`} />
       {error
         ? 'node error'
         : isLoading
           ? 'loading…'
-          : secondsUntilNextCheck !== null
-            ? `next check ${secondsUntilNextCheck}s`
-            : 'live'}
+          : !settings.autoRefresh
+            ? 'auto-refresh off'
+            : secondsUntilNextCheck !== null
+              ? `next check ${secondsUntilNextCheck}s`
+              : 'live'}
     </span>
-    <NodeSettings nodeUrl={nodeUrl} onNodeUrlChange={onNodeUrlChange} />
+    <SettingsMenu settings={settings} onSettingsChange={onSettingsChange} onClearCache={onClearCache} />
   </header>
 );
